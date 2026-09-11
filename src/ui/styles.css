@@ -1,0 +1,270 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * One palette for all three surfaces, expressed as tokens so the side panel,
+ * the options page and the popup cannot drift apart. Dark mode follows the
+ * browser rather than offering a switch: this UI lives inside Chrome's chrome,
+ * and matching it is less jarring than a theme of its own.
+ */
+:root {
+  --bg: #fbfbfa;
+  --bg-soft: #f2f2ef;
+  --bg-raised: #ffffff;
+  --line: #e3e3de;
+  --line-strong: #cfcfc8;
+  --ink: #15181d;
+  --ink-soft: #545a63;
+  --ink-faint: #868d97;
+  --accent: #3054d8;
+  --accent-soft: #e9eeff;
+  --good: #17724f;
+  --good-soft: #e3f5ec;
+  --warn: #9a5b06;
+  --warn-soft: #fdf0dc;
+  --bad: #a51f26;
+  --bad-soft: #fdeaea;
+  --shadow: 0 1px 2px rgba(16, 20, 28, 0.06), 0 4px 12px rgba(16, 20, 28, 0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216;
+    --bg-soft: #161a20;
+    --bg-raised: #1a1f26;
+    --line: #272d36;
+    --line-strong: #333b46;
+    --ink: #e8eaee;
+    --ink-soft: #a3abb6;
+    --ink-faint: #6f7884;
+    --accent: #7d9bff;
+    --accent-soft: #1c2740;
+    --good: #5cc79b;
+    --good-soft: #12281f;
+    --warn: #e0a35a;
+    --warn-soft: #2b2013;
+    --bad: #f08b8f;
+    --bad-soft: #2e1618;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.25);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* Scrollbars: thin and quiet, so dense lists do not look striped. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 3px solid var(--bg);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-faint);
+}
+
+@layer components {
+  .surface {
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .surface-quiet {
+    background: var(--bg-soft);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12.5px] font-medium transition-colors;
+    border: 1px solid var(--line-strong);
+    background: var(--bg-raised);
+    color: var(--ink);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--bg-soft);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+    background: var(--accent);
+  }
+
+  .btn-danger {
+    color: var(--bad);
+    border-color: var(--line-strong);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: var(--bad-soft);
+  }
+
+  .btn-ghost {
+    border-color: transparent;
+    background: transparent;
+    color: var(--ink-soft);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--bg-soft);
+    color: var(--ink);
+  }
+
+  .btn-sm {
+    @apply px-2 py-1 text-[11.5px];
+  }
+
+  .input,
+  .select,
+  .textarea {
+    @apply w-full rounded-md px-2.5 py-1.5 text-[12.5px];
+    background: var(--bg-raised);
+    border: 1px solid var(--line-strong);
+    color: var(--ink);
+    outline: none;
+  }
+  .input:focus,
+  .select:focus,
+  .textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .textarea {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+    resize: vertical;
+  }
+
+  .label {
+    @apply mb-1 block text-[11px] font-medium uppercase tracking-wide;
+    color: var(--ink-faint);
+  }
+
+  .hint {
+    @apply mt-1 text-[11.5px];
+    color: var(--ink-faint);
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium;
+    background: var(--bg-soft);
+    color: var(--ink-soft);
+    border: 1px solid var(--line);
+  }
+  .chip-good {
+    background: var(--good-soft);
+    color: var(--good);
+    border-color: transparent;
+  }
+  .chip-warn {
+    background: var(--warn-soft);
+    color: var(--warn);
+    border-color: transparent;
+  }
+  .chip-bad {
+    background: var(--bad-soft);
+    color: var(--bad);
+    border-color: transparent;
+  }
+  .chip-accent {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: transparent;
+  }
+
+  .tab {
+    @apply relative px-2.5 py-2 text-[12px] font-medium transition-colors;
+    color: var(--ink-faint);
+    cursor: pointer;
+    background: none;
+    border: none;
+  }
+  .tab:hover {
+    color: var(--ink);
+  }
+  .tab-active {
+    color: var(--ink);
+  }
+  .tab-active::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    background: var(--accent);
+    border-radius: 2px 2px 0 0;
+  }
+
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+  }
+
+  .divider {
+    height: 1px;
+    background: var(--line);
+  }
+
+  .row-hover:hover {
+    background: var(--bg-soft);
+  }
+}
+
+/* Indeterminate progress bar for long, uncountable operations. */
+@keyframes slide {
+  0% {
+    transform: translateX(-60%);
+  }
+  100% {
+    transform: translateX(260%);
+  }
+}
+.progress-indeterminate::after {
+  content: '';
+  display: block;
+  width: 38%;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  animation: slide 1.4s ease-in-out infinite;
+}
