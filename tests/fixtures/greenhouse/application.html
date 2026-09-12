@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<body>
+  <h1 class="app-title">Senior Backend Engineer</h1>
+  <span class="company-name">at Acme Corp</span>
+  <form id="application_form">
+    <div class="field">
+      <label for="first_name">First Name <span class="required">*</span></label>
+      <input type="text" id="first_name" name="job_application[first_name]" required />
+    </div>
+    <div class="field">
+      <label for="last_name">Last Name *</label>
+      <input type="text" id="last_name" name="job_application[last_name]" required />
+    </div>
+    <div class="field">
+      <label for="email">Email *</label>
+      <input type="email" id="email" name="job_application[email]" required />
+    </div>
+    <div class="field">
+      <label for="phone">Phone</label>
+      <input type="tel" id="phone" name="job_application[phone]" />
+    </div>
+    <div class="field">
+      <label for="resume">Resume/CV *</label>
+      <input type="file" id="resume" name="job_application[resume]" required />
+    </div>
+    <div class="field">
+      <label for="question_1">Why do you want to work at Acme?</label>
+      <textarea id="question_1" name="job_application[answers_attributes][0][text_value]" maxlength="2000"></textarea>
+    </div>
+    <div class="field">
+      <label for="question_2">Are you legally authorized to work in the United States? *</label>
+      <select id="question_2" name="job_application[answers_attributes][1][boolean_value]" required>
+        <option value="">Please select</option>
+        <option value="1">Yes</option>
+        <option value="0">No</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="linkedin">LinkedIn Profile</label>
+      <input type="url" id="linkedin" name="job_application[answers_attributes][2][text_value]" />
+    </div>
+    <fieldset class="field">
+      <legend>Will you now or in the future require sponsorship for employment visa status?</legend>
+      <label><input type="radio" name="sponsorship" value="yes" /> Yes</label>
+      <label><input type="radio" name="sponsorship" value="no" /> No</label>
+    </fieldset>
+    <div class="field">
+      <label for="gender">Gender</label>
+      <select id="gender" name="job_application[demographic][gender]">
+        <option value="">Select</option>
+        <option>Male</option>
+        <option>Female</option>
+        <option>Decline To Self Identify</option>
+      </select>
+    </div>
+    <input type="hidden" name="authenticity_token" value="secret" />
+    <input type="text" name="search" placeholder="Search jobs" />
+    <input type="submit" id="submit_app" value="Submit Application" />
+  </form>
+</body>
+</html>

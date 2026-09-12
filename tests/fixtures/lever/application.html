@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+<body>
+  <div class="posting-headline"><h2>Staff Frontend Engineer</h2></div>
+  <form class="application-form" action="/acme/apply">
+    <li class="application-question">
+      <label class="application-label">Full name<span class="required">✱</span></label>
+      <input type="text" name="name" required />
+    </li>
+    <li class="application-question">
+      <label class="application-label">Email<span class="required">✱</span></label>
+      <input type="email" name="email" required />
+    </li>
+    <li class="application-question">
+      <label class="application-label">Phone</label>
+      <input type="tel" name="phone" />
+    </li>
+    <li class="application-question">
+      <label class="application-label">Current company</label>
+      <input type="text" name="org" />
+    </li>
+    <li class="application-question">
+      <label class="application-label">LinkedIn URL</label>
+      <input type="url" name="urls[LinkedIn]" />
+    </li>
+    <li class="application-question">
+      <label class="application-label">GitHub URL</label>
+      <input type="url" name="urls[GitHub]" />
+    </li>
+    <li class="application-question">
+      <label class="application-label">Resume</label>
+      <input type="file" name="resume" />
+    </li>
+    <li class="application-question">
+      <label class="application-label">Additional information</label>
+      <textarea name="comments"></textarea>
+    </li>
+    <li class="application-question">
+      <label class="application-label">What is your expected salary?</label>
+      <input type="text" name="cards[abc123][field0]" />
+    </li>
+    <button type="submit" class="template-btn-submit">Submit application</button>
+  </form>
+</body>
+</html>
