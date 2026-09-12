@@ -1,0 +1,90 @@
+/**
+ * Site adapter contract.
+ *
+ * An adapter encodes what we know about one ATS: how to recognise its
+ * application form, which of its fields map to canonical profile keys, how to
+ * move to the next step, how to submit, and how to tell that a submission
+ * actually landed.
+ *
+ * Adapters are advisory, never load-bearing. If `canonicalKey` returns nothing
+ * the generic label matcher still runs; if `submitSelectors` all miss, the
+ * runner falls back to finding a submit-shaped button by its text. A stale
+ * adapter degrades the run, it does not break it.
+ */
+
+import type { CanonicalKey } from '@/form/canonical'
+import type { FieldDescriptor } from '@/storage/schemas'
+
+export type DetectResult = {
+  isApplicationForm: boolean
+  /** 0-1. Below 0.4 the runner treats the page as "not an application yet". */
+  confidence: number
+  jobTitle: string
+  company: string
+  multiStep: boolean
+  detail: string
+}
+
+export interface SiteAdapter {
+  readonly id: string
+  readonly label: string
+  /** Host/path test. Cheap, called on every page. */
+  matches(url: string): boolean
+  detect(doc: Document, url: string): DetectResult
+  /** Vendor-specific mapping, consulted before the generic label matcher. */
+  canonicalKey?(field: FieldDescriptor, doc?: Document): CanonicalKey | null
+  /** Buttons that submit the whole application, most specific first. */
+  submitSelectors: string[]
+  /** Buttons that advance a multi-step form without submitting. */
+  nextStepSelectors?: string[]
+  /** Elements whose presence proves the submission landed. */
+  successSelectors?: string[]
+  /** Page text that proves the submission landed. */
+  successPatterns: RegExp[]
+  /** Text that means the form rejected us (validation errors). */
+  errorSelectors?: string[]
+  /**
+   * A link or button that opens the real application form from a job page
+   * ("Apply for this job"). The runner clicks this before harvesting.
+   */
+  applyEntrySelectors?: string[]
+}
+
+/** Shared success phrasing. Every ATS says one of these on the thank-you page. */
+export const COMMON_SUCCESS_PATTERNS: RegExp[] = [
+  /thank you for (applying|your (interest|application))/i,
+  /your application (has been|was) (submitted|received|sent)/i,
+  /application (submitted|received|complete)/i,
+  /we(?:'| ha)ve received your application/i,
+  /successfully (submitted|applied)/i,
+]
+
+export const COMMON_ERROR_SELECTORS = [
+  '[role="alert"]',
+  '.error',
+  '[class*="error-message"]',
+  '[aria-invalid="true"]',
+  '[class*="field_with_errors"]',
+]
+
+/** Buttons that look like a submit control when no adapter selector matches. */
+export const GENERIC_SUBMIT_TEXT =
+  /^(submit( application)?|send application|apply( now)?|finish|complete application)$/i
+
+export const GENERIC_NEXT_TEXT = /^(next|continue|save and continue|next step|proceed)$/i
+
+export function textOf(el: Element | null): string {
+  return ((el as HTMLElement | null)?.innerText ?? '').trim()
+}
+
+export function firstMatch(doc: Document, selectors: string[]): HTMLElement | null {
+  for (const sel of selectors) {
+    try {
+      const el = doc.querySelector<HTMLElement>(sel)
+      if (el) return el
+    } catch {
+      // Skip selectors this engine cannot parse.
+    }
+  }
+  return null
+}
