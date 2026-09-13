@@ -32,7 +32,7 @@ import type {
 import type { Application, FieldDescriptor, FilledField, Job, Settings } from '@/storage/schemas'
 import { createLogger } from '@/shared/logger'
 import { errorMessage, pause, sleep, uid, withTimeout } from '@/shared/util'
-import { formAgentFiles, injectFiles } from '@/shared/injection'
+import { ensureContentScript, formAgentFiles } from '@/shared/injection'
 import { closeWorkerWindow, openWorkerWindow } from '@/shared/windows'
 
 const log = createLogger('runner')
@@ -154,23 +154,12 @@ async function pickFormFrame(tabId: number): Promise<number | undefined> {
 }
 
 async function ensureAgent(tabId: number): Promise<void> {
-  const start = Date.now()
-  let injected = false
-  while (Date.now() - start < AGENT_READY_TIMEOUT_MS) {
-    try {
-      await chrome.tabs.sendMessage(tabId, { type: 'form:ping' })
-      return
-    } catch {
-      if (!injected) {
-        injected = true
-        // A page outside the manifest's match list, or one loaded before the
-        // extension updated, has no agent yet.
-        await injectFiles(tabId, formAgentFiles(), { allFrames: true })
-      }
-      await sleep(700)
-    }
-  }
-  throw new Error('Form agent never became available on this page')
+  await ensureContentScript(
+    tabId,
+    formAgentFiles(),
+    { type: 'form:ping' },
+    { timeoutMs: AGENT_READY_TIMEOUT_MS, allFrames: true }
+  )
 }
 
 /** Click the adapter's "apply" entry point, when the form is behind one. */

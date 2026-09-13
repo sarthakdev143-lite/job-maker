@@ -16,7 +16,7 @@ import type { DeepSeekResponse } from '@/shared/messages'
 import type { LlmConfig } from '@/storage/schemas'
 import { createLogger } from '@/shared/logger'
 import { sleep, uid, withTimeout } from '@/shared/util'
-import { deepseekBridgeFiles, injectFiles } from '@/shared/injection'
+import { deepseekBridgeFiles, ensureContentScript, waitForTabComplete } from '@/shared/injection'
 import { openWorkerWindow } from '@/shared/windows'
 
 const log = createLogger('llm:deepseek')
@@ -24,6 +24,8 @@ const log = createLogger('llm:deepseek')
 const CHAT_URL = 'https://chat.deepseek.com/'
 const URL_MATCH = 'https://chat.deepseek.com/*'
 const BRIDGE_READY_TIMEOUT_MS = 30000
+/** Shorter than a real request: the panel calls this on every open. */
+const HEALTH_TIMEOUT_MS = 20000
 
 export class DeepSeekWebDriver implements LlmDriver {
   readonly id = 'deepseek-web'
@@ -79,54 +81,82 @@ export class DeepSeekWebDriver implements LlmDriver {
   }
 
   /**
-   * The content script is declared in the manifest, but a tab that was already
-   * open when the extension was installed or updated has no bridge in it. Ping,
-   * and inject on failure rather than making the user reload by hand.
+   * Wait for the bridge to answer, injecting it if the tab predates the
+   * extension being loaded.
+   *
+   * The tab is almost never ready the instant it is created, so this polls
+   * rather than asking once -- messaging too early fails with "Receiving end
+   * does not exist", which is a race, not a missing script.
    */
-  private async ensureBridge(tabId: number): Promise<void> {
-    const start = Date.now()
-    let injected = false
+  private async ensureBridge(tabId: number, timeoutMs = BRIDGE_READY_TIMEOUT_MS): Promise<void> {
+    const deadline = Date.now() + timeoutMs
 
-    while (Date.now() - start < BRIDGE_READY_TIMEOUT_MS) {
-      try {
-        const res = (await chrome.tabs.sendMessage(tabId, { type: 'ds:ping' })) as DeepSeekResponse | undefined
-        if (res && res.ok && res.type === 'ds:pong') {
-          if (!res.loggedIn) throw new LlmError('Not signed in to DeepSeek', 'not_logged_in')
-          if (res.ready) return
-        }
-      } catch (e) {
-        if (e instanceof LlmError) throw e
-        if (!injected) {
-          injected = true
-          const ok = await injectFiles(tabId, deepseekBridgeFiles())
-          log.debug(ok ? 'Injected DeepSeek bridge into an existing tab' : 'Bridge injection was refused')
-        }
+    while (Date.now() < deadline) {
+      const res = await ensureContentScript<DeepSeekResponse>(
+        tabId,
+        deepseekBridgeFiles(),
+        { type: 'ds:ping' },
+        { timeoutMs: Math.max(2000, deadline - Date.now()) }
+      )
+
+      if (res && res.ok && res.type === 'ds:pong') {
+        if (!res.loggedIn) throw new LlmError('Not signed in to DeepSeek', 'not_logged_in')
+        if (res.ready) return
       }
+      // Signed in but the composer has not mounted yet: give the app a moment.
       await sleep(600)
     }
-    throw new LlmError('DeepSeek tab never became ready', 'not_ready')
+    throw new LlmError('DeepSeek loaded but its chat box never appeared', 'not_ready')
   }
 
   /* ---------------------------------------------------------------- health */
 
+  /**
+   * Is the model usable right now?
+   *
+   * This has to go through the same readiness path as a real request. Asking
+   * the tab directly is what produced "Could not establish connection.
+   * Receiving end does not exist." on every start: the window had just been
+   * created and its page had not loaded yet.
+   */
   async health(): Promise<{ status: LlmHealth; detail: string }> {
     try {
       const tabId = await this.ensureTab()
-      const res = (await withTimeout(
-        chrome.tabs.sendMessage(tabId, { type: 'ds:status' }) as Promise<DeepSeekResponse>,
-        8000,
-        'DeepSeek status'
-      )) as DeepSeekResponse
-      if (!res || !res.ok) return { status: 'unreachable', detail: res?.ok === false ? res.error : 'no response' }
-      if (res.type !== 'ds:status') return { status: 'unreachable', detail: 'unexpected reply' }
+      await waitForTabComplete(tabId, 20000).catch(() => {
+        // A slow page is not fatal; the poll below gives it more time.
+      })
+
+      const res = await ensureContentScript<DeepSeekResponse>(
+        tabId,
+        deepseekBridgeFiles(),
+        { type: 'ds:status' },
+        { timeoutMs: HEALTH_TIMEOUT_MS }
+      )
+
+      if (!res || !res.ok) {
+        return { status: 'unreachable', detail: res?.ok === false ? res.error : 'no response from the DeepSeek tab' }
+      }
+      if (res.type !== 'ds:status') return { status: 'unreachable', detail: 'unexpected reply from the bridge' }
       if (!res.loggedIn) return { status: 'needs_login', detail: 'Sign in to chat.deepseek.com' }
-      if (!res.ready) return { status: 'unreachable', detail: 'Composer not found (DeepSeek UI may have changed)' }
+      if (!res.ready) {
+        return {
+          status: 'unreachable',
+          detail: 'Signed in, but the chat box was not found. DeepSeek may have changed its page.',
+        }
+      }
       return { status: 'ok', detail: res.detail }
     } catch (e) {
       if (e instanceof LlmError && e.code === 'not_logged_in') {
         return { status: 'needs_login', detail: e.message }
       }
-      return { status: 'unreachable', detail: (e as Error).message }
+      const message = (e as Error).message
+      if (/receiving end|never responded|Could not establish/i.test(message)) {
+        return {
+          status: 'unreachable',
+          detail: 'The DeepSeek tab did not respond. Open it, let it finish loading, then re-check.',
+        }
+      }
+      return { status: 'unreachable', detail: message }
     }
   }
 
@@ -172,11 +202,26 @@ export class DeepSeekWebDriver implements LlmDriver {
     }
 
     if (!res) throw new LlmError('DeepSeek bridge returned nothing', 'transport')
-    if (!res.ok) throw new LlmError(res.error, res.code ?? 'transport')
+    if (!res.ok) throw new LlmError(this.explain(res.error, res.code), res.code ?? 'transport')
     if (res.type !== 'ds:reply') throw new LlmError('Unexpected reply from DeepSeek bridge', 'transport')
 
     this.requestsSinceNewChat++
     return res.text
+  }
+
+  /**
+   * Add the context an error message cannot carry on its own.
+   *
+   * Chrome throttles timers in hidden tabs, and a minimized window is hidden:
+   * after several minutes it can slow them to roughly once a minute, which the
+   * bridge sees as a reply that never finishes. That is not obvious from a bare
+   * timeout, so the timeout says it.
+   */
+  private explain(message: string, code?: string): string {
+    if (code === 'timeout' && this.config.keepWindowMinimized) {
+      return `${message}. If this keeps happening, turn off "Keep the worker window minimised" in Settings > Model: Chrome throttles timers in minimised windows.`
+    }
+    return message
   }
 
   async reset(): Promise<void> {
