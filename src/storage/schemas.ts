@@ -210,7 +210,11 @@ export const AutonomySchema = z.object({
   }),
   /** Local-time window in which unattended runs are allowed. */
   activeHours: z.object({ start: z.number().default(9), end: z.number().default(21) }).default({}),
-  activeDays: z.array(z.number()).default([1, 2, 3, 4, 5]),
+  /**
+   * Every day by default. A weekdays-only default meant anyone who installed
+   * this on a Saturday found an agent that reported "running" and did nothing.
+   */
+  activeDays: z.array(z.number()).default([0, 1, 2, 3, 4, 5, 6]),
   /** Randomized pacing, in milliseconds. */
   delayBetweenFieldsMs: z
     .object({ min: z.number().default(120), max: z.number().default(450) })

@@ -28,6 +28,7 @@ export type UiRequest =
   | { type: 'ui:saveProfile'; profile: Profile }
   | { type: 'ui:parseResume'; text: string; mode: 'fill_empty' | 'replace' }
   | { type: 'ui:suggestRules' }
+  | { type: 'ui:setupSearches' }
   | { type: 'ui:getRecipes' }
   | { type: 'ui:saveRecipe'; recipe: SearchRecipe }
   | { type: 'ui:deleteRecipe'; id: string }

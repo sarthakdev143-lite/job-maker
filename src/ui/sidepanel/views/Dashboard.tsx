@@ -8,6 +8,7 @@
  * a log line the user has no reason to go looking for.
  */
 
+import { useState } from 'react'
 import { api, openSettings, useAction, useAsync, type PreflightCheck } from '../../shared/api'
 import { Badge, ConfirmButton, Empty, Spinner, Stat } from '../../shared/components'
 import { formatRelative } from '@/shared/util'
@@ -23,6 +24,7 @@ export default function Dashboard({
   const { data: stats, loading, reload } = useAsync(() => api.stats(), [state?.updatedAt])
   const { data: checks, loading: checking, reload: recheck } = useAsync(() => api.preflight(), [])
   const { run, busy } = useAction()
+  const [setupNote, setSetupNote] = useState('')
 
   if (loading && !stats) return <Spinner label="Reading agent state" />
 
@@ -40,6 +42,42 @@ export default function Dashboard({
           <p className="mt-0.5 text-[11.5px]" style={{ color: 'var(--ink-soft)' }}>
             Pressing Start will refuse until these are sorted. Each one links to where it is fixed.
           </p>
+
+          {/*
+            Having nowhere to look is the one blocker the agent can fix for
+            itself, so it offers to rather than sending the user to another
+            screen to do it by hand.
+          */}
+          {blockers.some((c) => c.id === 'searches') && (
+            <div className="mt-2">
+              <button
+                className="btn btn-primary btn-sm"
+                disabled={!!busy}
+                onClick={() =>
+                  run(async () => {
+                    const result = await api.setupSearches()
+                    setSetupNote(
+                      result.needsManual
+                        ? 'The model would not name any boards it was sure of. Open Searches and add one by hand.'
+                        : `Created and switched on — ${result.created.join('; ')}`
+                    )
+                    recheck()
+                    reload()
+                  }, 'setting up searches')
+                }
+              >
+                {busy === 'setting up searches' ? 'Reading your profile…' : 'Set up searches for me'}
+              </button>
+              <p className="mt-1 text-[11px]" style={{ color: 'var(--ink-soft)' }}>
+                Builds real searches from your profile. Takes about half a minute.
+              </p>
+              {setupNote && (
+                <p className="mt-1.5 text-[11.5px]" style={{ color: 'var(--ink)' }}>
+                  {setupNote}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       )}
 

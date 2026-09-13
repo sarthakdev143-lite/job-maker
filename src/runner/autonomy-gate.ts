@@ -21,6 +21,14 @@ export type GateDecision = {
 
 export type GateFacts = {
   autonomy: Autonomy
+  /**
+   * Set for a run the user started by hand.
+   *
+   * The active-hours window exists so unattended runs do not fire at 3am. It
+   * has no business blocking a button the user just pressed, whatever day it
+   * happens to be.
+   */
+  ignoreActiveHours?: boolean
   matchScore: number | null
   fillConfidence: number
   plan: FilledField[]
@@ -55,7 +63,7 @@ export function evaluateGate(facts: GateFacts): GateDecision {
     return { action: 'review', reasons: [`${facts.vendor} daily cap reached (${vendorCap})`] }
   }
 
-  if (!withinActiveWindow(autonomy, facts.now)) {
+  if (!facts.ignoreActiveHours && !withinActiveWindow(autonomy, facts.now)) {
     return { action: 'review', reasons: ['outside the configured active hours'], haltRun: true }
   }
 

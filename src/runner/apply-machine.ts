@@ -44,6 +44,8 @@ const AGENT_READY_TIMEOUT_MS = 25000
 export type ApplyOptions = {
   /** Fill and stop, whatever the settings say. Used by "test on this URL". */
   forceDryRun?: boolean
+  /** The user started this run by hand, so the working-hours window is moot. */
+  ignoreActiveHours?: boolean
   shouldStop?: () => boolean
   onStep?: (step: string, detail?: string) => void
 }
@@ -379,6 +381,7 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
 
     const decision = evaluateGate({
       autonomy,
+      ignoreActiveHours: options.ignoreActiveHours,
       matchScore: job.matchScore,
       fillConfidence: confidence,
       plan: allPlan,

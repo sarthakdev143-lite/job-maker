@@ -32,86 +32,18 @@ export default function SearchesSection() {
    * The alternative was shipping example searches aimed at companies the user
    * has never mentioned, which they then had to understand, edit and switch on
    * before anything worked at all. Asking the model once is faster and produces
-   * something aimed at them.
+   * something aimed at them. The work happens in the worker so the side panel
+   * can offer the same button.
    */
   const setupFromProfile = () =>
     run(async () => {
       setSetupSummary(null)
-      const [suggestion, profile] = await Promise.all([api.suggestRules(), api.getProfile()])
-      const keywords = suggestion.searchKeywords.length > 0 ? suggestion.searchKeywords : suggestion.titleIncludes
-      const created: string[] = []
-
-      const make = async (recipe: SearchRecipe, description: string) => {
-        await api.saveRecipe(recipe)
-        created.push(description)
-      }
-
-      if (suggestion.greenhouseBoards.length > 0) {
-        await make(
-          {
-            id: uid('recipe'),
-            name: 'Greenhouse boards',
-            enabled: true,
-            source: 'greenhouse',
-            keywords,
-            location: '',
-            remoteOnly: false,
-            boards: suggestion.greenhouseBoards,
-            customUrls: [],
-            maxResultsPerRun: 40,
-            lastRunAt: null,
-          },
-          `Greenhouse: ${suggestion.greenhouseBoards.join(', ')}`
-        )
-      }
-
-      if (suggestion.leverBoards.length > 0) {
-        await make(
-          {
-            id: uid('recipe'),
-            name: 'Lever boards',
-            enabled: true,
-            source: 'lever',
-            keywords,
-            location: '',
-            remoteOnly: false,
-            boards: suggestion.leverBoards,
-            customUrls: [],
-            maxResultsPerRun: 40,
-            lastRunAt: null,
-          },
-          `Lever: ${suggestion.leverBoards.join(', ')}`
-        )
-      }
-
-      // Naukri is the only broad search switched on automatically, and only for
-      // India. Indeed stays off deliberately: its terms prohibit automation.
-      if (/india/i.test(profile.country) && keywords.length > 0) {
-        await make(
-          {
-            id: uid('recipe'),
-            name: `Naukri - ${keywords[0]}`,
-            enabled: true,
-            source: 'naukri',
-            keywords,
-            location: profile.city,
-            remoteOnly: false,
-            boards: [],
-            customUrls: [],
-            maxResultsPerRun: 30,
-            lastRunAt: null,
-          },
-          `Naukri: ${keywords.join(', ')}${profile.city ? ` in ${profile.city}` : ''}`
-        )
-      }
-
-      if (created.length === 0) {
-        created.push(
-          'Nothing could be built automatically - the model did not return board names it was confident about. Add one by hand below.'
-        )
-      }
-
-      setSetupSummary(created)
+      const result = await api.setupSearches()
+      setSetupSummary(
+        result.needsManual
+          ? ['Nothing could be built automatically - the model would not name boards it was confident about. Add one by hand below.']
+          : result.created
+      )
       reload()
     }, 'setting up')
 

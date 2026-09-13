@@ -13,6 +13,7 @@
 
 import { orchestrator } from './orchestrator'
 import { runDiscovery } from '@/discovery'
+import { setUpSearchesFromProfile } from '@/discovery/setup'
 import { applyToJob, dryRunUrl, submitApprovedApplication } from '@/runner/apply-machine'
 import { llm } from '@/llm/broker'
 import { answersRepo, applicationsRepo, dbStats, docsRepo, jobsRepo, logsRepo } from '@/storage/db'
@@ -101,6 +102,12 @@ async function route(msg: UiRequest): Promise<unknown> {
         roles: parsed.experience.length,
         seeded,
       }
+    }
+
+    case 'ui:setupSearches': {
+      const result = await setUpSearchesFromProfile()
+      broadcast({ type: 'evt:jobs' })
+      return result
     }
 
     case 'ui:suggestRules': {
@@ -336,7 +343,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       log.info('Scheduled cycle starting')
       await orchestrator.start().catch((e) => log.warn(`Scheduled start refused: ${errorMessage(e)}`))
     } else {
-      await orchestrator.runCycleNow()
+      await orchestrator.runCycleNow({ manual: false })
     }
   }
 

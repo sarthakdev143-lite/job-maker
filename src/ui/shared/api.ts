@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sendToWorker } from '@/shared/messages'
 import type { PreflightCheck } from '@/background/orchestrator'
+import type { SetupResult } from '@/discovery/setup'
 import type { AgentState, BroadcastEvent, UiRequest } from '@/shared/messages'
 import type {
   AnswerBankEntry,
@@ -31,6 +32,7 @@ export const api = {
   parseResume: (text: string, mode: 'fill_empty' | 'replace') =>
     sendToWorker<ResumeImportResult>({ type: 'ui:parseResume', text, mode }),
   suggestRules: () => sendToWorker<SuggestedRules>({ type: 'ui:suggestRules' }),
+  setupSearches: () => sendToWorker<SetupResult>({ type: 'ui:setupSearches' }),
   getRecipes: () => sendToWorker<SearchRecipe[]>({ type: 'ui:getRecipes' }),
   saveRecipe: (recipe: SearchRecipe) => sendToWorker<SearchRecipe[]>({ type: 'ui:saveRecipe', recipe }),
   deleteRecipe: (id: string) => sendToWorker<SearchRecipe[]>({ type: 'ui:deleteRecipe', id }),
@@ -76,7 +78,7 @@ export type ResumeImportResult = {
   seeded: number
 }
 
-export type { PreflightCheck }
+export type { PreflightCheck, SetupResult }
 
 /** Open the settings page at a particular section. */
 export function openSettings(section?: string): void {
