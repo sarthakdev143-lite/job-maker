@@ -11,14 +11,17 @@
 import { useState } from 'react'
 import { api, openSettings, useAction, useAsync, type PreflightCheck } from '../../shared/api'
 import { Badge, ConfirmButton, Empty, Spinner, Stat } from '../../shared/components'
+import NowCard from './NowCard'
 import { formatRelative } from '@/shared/util'
 import type { AgentState } from '@/shared/messages'
 
 export default function Dashboard({
   state,
+  reachable,
   onNavigate,
 }: {
   state: AgentState | null
+  reachable: boolean
   onNavigate: (tab: 'jobs' | 'review' | 'applications') => void
 }) {
   const { data: stats, loading, reload } = useAsync(() => api.stats(), [state?.updatedAt])
@@ -34,6 +37,8 @@ export default function Dashboard({
 
   return (
     <div>
+      <NowCard state={state} reachable={reachable} onRecheck={recheck} />
+
       {blockers.length > 0 && !running && (
         <div className="mb-3 rounded-md px-3 py-2.5" style={{ background: 'var(--bad-soft)' }}>
           <p className="text-[12.5px] font-medium" style={{ color: 'var(--bad)' }}>

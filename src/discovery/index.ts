@@ -17,6 +17,7 @@ import { jobsRepo } from '@/storage/db'
 import { getRecipes, getSettings, saveRecipe } from '@/storage/settings'
 import { parsePostedDate } from '@/shared/text'
 import { createLogger } from '@/shared/logger'
+import { activity } from '@/shared/activity'
 import { errorMessage } from '@/shared/util'
 import type { Job, SearchRecipe } from '@/storage/schemas'
 
@@ -75,6 +76,7 @@ export async function runDiscovery(
     result.byRecipe[recipe.id] = entry
 
     try {
+      activity.relabel(`Searching: ${recipe.name}`)
       log.info(`Running recipe "${recipe.name}" (${recipe.source})`)
       let jobs = await runRecipe(recipe)
       entry.fetched = jobs.length

@@ -8,6 +8,7 @@
  * in the worker's router.
  */
 
+import type { ActivityStep } from './activity'
 import type {
   Application,
   FieldDescriptor,
@@ -61,6 +62,14 @@ export type UiRequest =
   | { type: 'ui:dryRunUrl'; url: string }
 
 /* ------------------------------------- background -> DeepSeek content script */
+
+/** Sent by the bridge while a reply streams in, purely so the UI can prove it is alive. */
+export type DeepSeekProgress = {
+  type: 'ds:progress'
+  requestId: string
+  chars: number
+  generating: boolean
+}
 
 export type DeepSeekRequest =
   | { type: 'ds:ping' }
@@ -144,7 +153,10 @@ export type AgentState = {
   running: boolean
   phase: AgentPhase
   currentJobId: string
+  /** Mirror of `step.label`, kept for surfaces that only need one line. */
   currentStep: string
+  /** The live picture: what it is doing, since when, and what is blocking. */
+  step: ActivityStep
   llmHealth: 'ok' | 'needs_login' | 'unreachable' | 'unknown'
   appliedToday: number
   dailyCap: number

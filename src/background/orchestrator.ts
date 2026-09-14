@@ -13,7 +13,7 @@
 
 import { runDiscovery, unscoredJobs } from '@/discovery'
 import { getRecipes } from '@/storage/settings'
-import { scoreBatch } from '@/matching/scorer'
+import { scoreJob } from '@/matching/scorer'
 import { applyToJob } from '@/runner/apply-machine'
 import { dailyCounterKey, withinActiveWindow } from '@/runner/autonomy-gate'
 import { applicationsRepo, jobsRepo, logsRepo } from '@/storage/db'
@@ -22,7 +22,8 @@ import { llm } from '@/llm/broker'
 import { createLogger } from '@/shared/logger'
 import { dayKey, errorMessage, pause } from '@/shared/util'
 import type { AgentState } from '@/shared/messages'
-import type { Autonomy } from '@/storage/schemas'
+import { activity, idleStep } from '@/shared/activity'
+import type { Autonomy, Job, Settings } from '@/storage/schemas'
 
 const log = createLogger('agent')
 
@@ -54,6 +55,7 @@ class Orchestrator {
     phase: 'idle',
     currentJobId: '',
     currentStep: '',
+    step: idleStep(),
     llmHealth: 'unknown',
     appliedToday: 0,
     dailyCap: 0,
@@ -76,6 +78,13 @@ class Orchestrator {
   private cycleInFlight: Promise<void> | null = null
   private listeners = new Set<StateListener>()
   private consecutiveFailures = 0
+
+  constructor() {
+    // Every change to what the agent is doing -- including the fine-grained
+    // notes from the model driver and the form filler -- becomes a state update
+    // the panel can see. This is what turns silent waiting into visible work.
+    activity.onChange((step) => this.patch({ step, currentStep: step.label }))
+  }
 
   /* ----------------------------------------------------------------- state */
 
@@ -248,6 +257,7 @@ class Orchestrator {
     this.manualRun = true
     this.consecutiveFailures = 0
     this.patch({ running: true, phase: 'idle', lastError: '', startedAt: Date.now() })
+    activity.begin('discovering', 'Starting up', 30_000)
     log.info(`Agent started in ${settings.autonomy.mode} mode`)
 
     void this.runCycle()
@@ -256,17 +266,20 @@ class Orchestrator {
 
   async stop(): Promise<AgentState> {
     this.stopRequested = true
-    this.patch({ phase: 'stopped', currentStep: 'stopping after the current step' })
+    this.patch({ phase: 'stopped' })
+    activity.begin('stopped', 'Stopping after the current step')
     log.info('Stop requested')
     await this.cycleInFlight?.catch(() => {})
-    this.patch({ running: false, phase: 'idle', currentStep: '', currentJobId: '' })
+    this.patch({ running: false, phase: 'idle', currentJobId: '' })
+    activity.end('Stopped')
     return this.getState()
   }
 
   /** Immediate halt: stop the loop and close any worker windows we opened. */
   async killSwitch(): Promise<AgentState> {
     this.stopRequested = true
-    this.patch({ running: false, phase: 'stopped', currentStep: 'halted', currentJobId: '' })
+    this.patch({ running: false, phase: 'stopped', currentJobId: '' })
+    activity.end('Halted by the kill switch')
     log.warn('Kill switch engaged')
     const windows = await chrome.windows.getAll({ populate: true }).catch(() => [])
     for (const win of windows) {
@@ -307,7 +320,7 @@ class Orchestrator {
     // A run that finds nothing is a normal outcome, and it has to leave a trace
     // in the UI. Clearing the status line at the end of every cycle is what made
     // a working agent look like a frozen one.
-    const tally = { found: 0, scored: 0, queued: 0, applied: 0 }
+    const tally = { found: 0, scored: 0, queued: 0, applied: 0, bestScore: 0 }
 
     try {
       await pruneCounters(dayKey())
@@ -315,13 +328,15 @@ class Orchestrator {
 
       if (!this.manualRun && !withinActiveWindow(settings.autonomy)) {
         const when = describeNextWindow(settings.autonomy)
-        this.patch({ phase: 'paused', currentStep: `waiting for active hours (${when})` })
+        this.patch({ phase: 'paused' })
+        activity.begin('paused', `Waiting for active hours - next run ${when}`)
         log.info(`Outside active hours; the next scheduled run is ${when}. Press Start to run now anyway.`)
         return
       }
 
       // --- discover ------------------------------------------------------
-      this.patch({ phase: 'discovering', currentStep: 'running search recipes' })
+      this.patch({ phase: 'discovering' })
+      activity.begin('discovering', 'Searching job boards', 120_000)
       const discovery = await runDiscovery({ shouldStop: this.shouldStop })
       tally.found = discovery.stored
       log.info(
@@ -329,30 +344,38 @@ class Orchestrator {
       )
       if (this.shouldStop()) return
 
-      // --- score ---------------------------------------------------------
+      // --- score, and apply the moment something qualifies ----------------
+      //
+      // Scoring the whole batch before applying to any of it meant the first
+      // application was minutes away and the log sat silent in between, which
+      // reads as a hung agent. Applying as soon as a job clears the bar gets
+      // the first one out in about the time it takes to score one posting.
       const toScore = await unscoredJobs(30)
       if (toScore.length > 0) {
-        this.patch({ phase: 'scoring', currentStep: `scoring ${toScore.length} job(s)` })
+        this.patch({ phase: 'scoring' })
+        activity.begin('scoring', `Scoring ${toScore.length} posting(s)`, 15_000)
         const profile = await getProfile()
-        const scores = await scoreBatch(
-          toScore,
-          profile,
-          settings,
-          (done, total, job) => {
-            this.patch({ currentStep: `scored ${done}/${total}: ${job.title}`, currentJobId: job.id })
-          },
-          this.shouldStop
-        )
+        const threshold = settings.autonomy.minMatchScore
+        let index = 0
 
         for (const job of toScore) {
-          const score = scores.get(job.id)
-          if (!score) {
-            await jobsRepo.update(job.id, { status: 'new' }) // leave for the next cycle
-            continue
+          if (this.shouldStop()) return
+          index++
+          this.patch({ phase: 'scoring', currentJobId: job.id })
+          activity.begin('scoring', `Scoring ${index} of ${toScore.length}: ${job.title}`, 15_000)
+
+          let score
+          try {
+            score = await scoreJob(job, profile, settings)
+          } catch (e) {
+            log.warn(`Could not score ${job.title} at ${job.company}: ${errorMessage(e)}`, undefined, job.id)
+            continue // left as 'new', so the next cycle retries it
           }
+
           tally.scored++
-          const queue = score.shouldApply && score.score >= settings.autonomy.minMatchScore
-          if (queue) tally.queued++
+          tally.bestScore = Math.max(tally.bestScore, score.score)
+          const queue = score.shouldApply && score.score >= threshold
+
           await jobsRepo.update(job.id, {
             status: queue ? 'queued' : 'rejected',
             matchScore: score.score,
@@ -361,11 +384,28 @@ class Orchestrator {
             rejectReason: queue ? '' : `scored ${score.score}: ${score.concerns.join('; ') || 'below threshold'}`,
             scoredAt: Date.now(),
           })
+
+          log.info(
+            `${score.score}/100 ${queue ? 'QUEUED' : 'passed over'} - ${job.title} at ${job.company}` +
+              (queue ? '' : ` (needs ${threshold}${score.concerns.length ? `; ${score.concerns[0]}` : ''})`),
+            undefined,
+            job.id
+          )
+
+          if (!queue) continue
+          tally.queued++
+
+          const updated = await jobsRepo.get(job.id)
+          if (updated) {
+            const carryOn = await this.applyOne(updated, settings)
+            if (carryOn) tally.applied++
+            else return
+          }
         }
       }
       if (this.shouldStop()) return
 
-      // --- apply ---------------------------------------------------------
+      // --- anything queued by an earlier cycle -----------------------------
       await this.applyQueue()
     } catch (e) {
       const message = errorMessage(e)
@@ -379,80 +419,89 @@ class Orchestrator {
       // no reason given.
       const explained = this.state.phase === 'error' || this.state.phase === 'paused'
       if (this.state.running && !explained) {
-        this.patch({ phase: 'idle', currentStep: summarize(tally), currentJobId: '' })
+        this.patch({ phase: 'idle', currentJobId: '' })
+        activity.end(summarize(tally))
       }
     }
+  }
+
+  /**
+   * Apply to one job, with every reason to stop the whole run checked first.
+   *
+   * Returns false when the run should end -- a cap reached, the window closed,
+   * the circuit breaker tripped -- so both callers can stop cleanly rather than
+   * each reimplementing the same guards.
+   */
+  private async applyOne(job: Job, settings: Settings): Promise<boolean> {
+    if (this.shouldStop()) return false
+
+    // A job parked for review stays queued so the user can still see it, but
+    // re-running it every cycle would redo the model work and re-park it for
+    // ever. Only untouched jobs and genuinely queued ones are applied to.
+    const existing = await applicationsRepo.byJob(job.id)
+    if (existing && existing.status !== 'queued') {
+      log.debug(`Skipping ${job.title}: application already ${existing.status}`, undefined, job.id)
+      return true
+    }
+
+    const appliedToday = await getCounter(dailyCounterKey())
+    if (appliedToday >= settings.autonomy.maxApplicationsPerDay) {
+      log.info(`Daily cap reached (${appliedToday}/${settings.autonomy.maxApplicationsPerDay}); pausing`)
+      this.patch({ phase: 'paused' })
+      activity.begin('paused', `Daily cap reached (${appliedToday} sent today)`)
+      return false
+    }
+
+    if (!this.manualRun && !withinActiveWindow(settings.autonomy)) {
+      log.info('Active hours ended mid-run; pausing')
+      this.patch({ phase: 'paused' })
+      activity.begin('paused', 'Active hours ended')
+      return false
+    }
+
+    this.patch({ phase: 'applying', currentJobId: job.id })
+    activity.begin('applying', `Applying: ${job.title} at ${job.company}`, 180_000)
+
+    try {
+      const outcome = await applyToJob(job.id, {
+        shouldStop: this.shouldStop,
+        ignoreActiveHours: this.manualRun,
+        // The step notes reach the panel through `activity`; this only keeps the
+        // job id current so the UI can link to what is being worked on.
+        onStep: () => this.patch({ currentJobId: job.id }),
+      })
+
+      this.consecutiveFailures = outcome.application.status === 'failed' ? this.consecutiveFailures + 1 : 0
+
+      if (this.consecutiveFailures >= settings.autonomy.circuitBreakerFailures) {
+        const message = `Stopping: ${this.consecutiveFailures} applications failed in a row`
+        log.error(message)
+        this.patch({ phase: 'error', lastError: message, running: false })
+        this.stopRequested = true
+        return false
+      }
+    } catch (e) {
+      this.consecutiveFailures++
+      log.error(`Unexpected failure on ${job.title}`, { error: errorMessage(e) }, job.id)
+    }
+
+    await this.refreshCounts()
+    if (this.shouldStop()) return false
+    await pause(settings.autonomy.delayBetweenApplicationsMs)
+    return true
   }
 
   private async applyQueue(): Promise<void> {
     const settings = await getSettings()
     const queued = await jobsRepo.byStatus('queued', 100)
-    if (queued.length === 0) {
-      // Saying so explicitly matters: an empty queue after a full cycle looks
-      // exactly like a broken agent unless it tells you that is what happened.
-      log.info('Nothing queued to apply to. Run a search, or lower the match threshold.')
-      this.patch({ currentStep: 'nothing queued to apply to' })
-      return
-    }
+    if (queued.length === 0) return
 
-    this.patch({ phase: 'applying', currentStep: `${queued.length} job(s) queued` })
+    this.patch({ phase: 'applying' })
+    activity.begin('applying', `${queued.length} job(s) queued`, 180_000)
 
     for (const job of queued) {
-      if (this.shouldStop()) return
-
-      // A job parked for review stays queued so the user can still see it, but
-      // re-running it every cycle would redo the model work and re-park it for
-      // ever. Only untouched jobs and genuinely queued ones are applied to.
-      const existing = await applicationsRepo.byJob(job.id)
-      if (existing && existing.status !== 'queued') {
-        log.debug(`Skipping ${job.title}: application already ${existing.status}`, undefined, job.id)
-        continue
-      }
-
-      const appliedToday = await getCounter(dailyCounterKey())
-      if (appliedToday >= settings.autonomy.maxApplicationsPerDay) {
-        log.info(`Daily cap reached (${appliedToday}/${settings.autonomy.maxApplicationsPerDay}); pausing`)
-        this.patch({ phase: 'paused', currentStep: 'daily cap reached' })
-        return
-      }
-
-      if (!this.manualRun && !withinActiveWindow(settings.autonomy)) {
-        log.info('Active hours ended mid-run; pausing')
-        this.patch({ phase: 'paused', currentStep: 'outside active hours' })
-        return
-      }
-
-      this.patch({ currentJobId: job.id, currentStep: `applying: ${job.title} at ${job.company}` })
-
-      try {
-        const outcome = await applyToJob(job.id, {
-          shouldStop: this.shouldStop,
-          ignoreActiveHours: this.manualRun,
-          onStep: (step, detail) =>
-            this.patch({ currentStep: `${job.company}: ${step}${detail ? ` (${detail})` : ''}` }),
-        })
-
-        if (outcome.application.status === 'failed') {
-          this.consecutiveFailures++
-        } else {
-          this.consecutiveFailures = 0
-        }
-
-        if (this.consecutiveFailures >= settings.autonomy.circuitBreakerFailures) {
-          const message = `Stopping: ${this.consecutiveFailures} applications failed in a row`
-          log.error(message)
-          this.patch({ phase: 'error', lastError: message, running: false })
-          this.stopRequested = true
-          return
-        }
-      } catch (e) {
-        this.consecutiveFailures++
-        log.error(`Unexpected failure on ${job.title}`, { error: errorMessage(e) }, job.id)
-      }
-
-      await this.refreshCounts()
-      if (this.shouldStop()) return
-      await pause(settings.autonomy.delayBetweenApplicationsMs)
+      const carryOn = await this.applyOne(job, settings)
+      if (!carryOn) return
     }
   }
 }
@@ -491,13 +540,21 @@ export function describeNextWindow(autonomy: Autonomy, from: Date = new Date()):
  * "nothing, and here is the first thing to change" is a status and a blank line
  * is not.
  */
-function summarize(tally: { found: number; scored: number; queued: number; applied: number }): string {
+function summarize(tally: {
+  found: number
+  scored: number
+  queued: number
+  applied: number
+  bestScore: number
+}): string {
   const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   if (tally.found === 0 && tally.scored === 0) {
     return `last run ${at}: no new postings found - widen your searches or filters`
   }
   if (tally.queued === 0 && tally.scored > 0) {
-    return `last run ${at}: scored ${tally.scored}, none cleared your match threshold`
+    // Naming the best score turns "nothing matched" into a number the user can
+    // act on: either the threshold is too high or the searches are wrong.
+    return `last run ${at}: scored ${tally.scored}, best was ${tally.bestScore} - lower your match threshold or fix the searches`
   }
-  return `last run ${at}: ${tally.found} found, ${tally.scored} scored, ${tally.queued} queued`
+  return `last run ${at}: ${tally.found} found, ${tally.scored} scored, ${tally.queued} queued, ${tally.applied} attempted`
 }

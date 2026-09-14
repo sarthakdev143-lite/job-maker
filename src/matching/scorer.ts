@@ -36,7 +36,6 @@ export async function scoreJob(job: Job, profile: Profile, settings: Settings): 
     `score ${job.company} / ${job.title}`
   )
 
-  log.debug(`Scored ${job.title} at ${job.company}: ${result.score}`, { reasons: result.reasons })
   return result
 }
 

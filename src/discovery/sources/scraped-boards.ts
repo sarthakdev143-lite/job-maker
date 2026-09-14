@@ -14,6 +14,7 @@
 import { createLogger } from '@/shared/logger'
 import { pause, sleep } from '@/shared/util'
 import { closeWorkerWindow, openWorkerWindow } from '@/shared/windows'
+import { activity } from '@/shared/activity'
 import type { Job, SearchRecipe } from '@/storage/schemas'
 import { makeJob } from './ats-apis'
 
@@ -40,6 +41,7 @@ async function waitForLoad(tabId: number, timeoutMs = 30000): Promise<void> {
   while (Date.now() - start < timeoutMs) {
     const tab = await chrome.tabs.get(tabId).catch(() => null)
     if (!tab) throw new Error('Discovery tab disappeared')
+    activity.note(`loading the search page (${Math.round((Date.now() - start) / 1000)}s)`)
     if (tab.status === 'complete') {
       await sleep(1200) // client-rendered results land after load completes
       return
@@ -61,6 +63,7 @@ async function closeWindow(windowId: number): Promise<void> {
 /** Scroll like a reader so lazily-rendered cards actually render. */
 async function humanScroll(tabId: number, passes = 4): Promise<void> {
   for (let i = 0; i < passes; i++) {
+    activity.note(`scrolling the results (${i + 1} of ${passes})`)
     await chrome.scripting
       .executeScript({
         target: { tabId },
@@ -102,11 +105,13 @@ export async function fetchIndeed(recipe: SearchRecipe): Promise<Job[]> {
   const jobs: Job[] = []
 
   for (const url of urls) {
+    activity.note(`opening ${new URL(url).hostname}`)
     const { tabId, windowId } = await openWorkerTab(url)
     try {
       await waitForLoad(tabId)
       await humanScroll(tabId)
       const cards = (await runInTab(tabId, scrapeIndeedCards)) ?? []
+      activity.note(`read ${cards.length} listing(s) from Indeed`)
       log.info(`Indeed: ${cards.length} card(s) from ${url}`)
       for (const card of cards.slice(0, recipe.maxResultsPerRun)) {
         if (!card.url) continue
@@ -133,7 +138,7 @@ export async function fetchIndeed(recipe: SearchRecipe): Promise<Job[]> {
   return jobs
 }
 
-function buildIndeedUrls(recipe: SearchRecipe): string[] {
+export function buildIndeedUrls(recipe: SearchRecipe): string[] {
   const q = encodeURIComponent(recipe.keywords.join(' ') || 'software engineer')
   const l = encodeURIComponent(recipe.location || '')
   const base = `https://www.indeed.com/jobs?q=${q}&l=${l}&sort=date`
@@ -171,11 +176,13 @@ export async function fetchNaukri(recipe: SearchRecipe): Promise<Job[]> {
   const jobs: Job[] = []
 
   for (const url of urls) {
+    activity.note(`opening ${url.replace('https://www.', '')}`)
     const { tabId, windowId } = await openWorkerTab(url)
     try {
       await waitForLoad(tabId)
       await humanScroll(tabId, 5)
       const cards = (await runInTab(tabId, scrapeNaukriCards)) ?? []
+      activity.note(`read ${cards.length} listing(s) from Naukri`)
       log.info(`Naukri: ${cards.length} card(s) from ${url}`)
       for (const card of cards.slice(0, recipe.maxResultsPerRun)) {
         if (!card.url) continue
@@ -202,11 +209,33 @@ export async function fetchNaukri(recipe: SearchRecipe): Promise<Job[]> {
   return jobs
 }
 
-function buildNaukriUrls(recipe: SearchRecipe): string[] {
-  const keywords = (recipe.keywords.join(' ') || 'software engineer').toLowerCase().replace(/\s+/g, '-')
-  const location = recipe.location.toLowerCase().replace(/\s+/g, '-')
-  const path = location ? `${keywords}-jobs-in-${location}` : `${keywords}-jobs`
-  return [`https://www.naukri.com/${path}`, `https://www.naukri.com/${path}-2`]
+/**
+ * One URL per role phrase, not one URL containing every phrase.
+ *
+ * Naukri search paths are slugs, so joining eight keywords produced
+ * "principal-software-architect-distributed-systems-solution-architect-..."
+ * -- a single query matching almost nothing. Each phrase now gets its own
+ * search, which is what a person would actually type.
+ */
+export function buildNaukriUrls(recipe: SearchRecipe): string[] {
+  const slug = (value: string): string =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .slice(0, 60)
+      .replace(/-+$/, '')
+
+  const phrases = recipe.keywords.map(slug).filter(Boolean).slice(0, 3)
+  if (phrases.length === 0) phrases.push('software-engineer')
+
+  const location = slug(recipe.location)
+  return phrases.map((phrase) =>
+    location
+      ? `https://www.naukri.com/${phrase}-jobs-in-${location}`
+      : `https://www.naukri.com/${phrase}-jobs`
+  )
 }
 
 /* ------------------------------------------------------- description fill */
@@ -218,8 +247,10 @@ function buildNaukriUrls(recipe: SearchRecipe): string[] {
  */
 export async function hydrateDescriptions(jobs: Job[], limit = 12): Promise<Job[]> {
   const targets = jobs.filter((j) => j.descriptionText.length < 400).slice(0, limit)
+  let done = 0
   for (const job of targets) {
     if (!job.url) continue
+    activity.note(`reading full description ${++done} of ${targets.length}: ${job.title}`)
     const { tabId, windowId } = await openWorkerTab(job.url)
     try {
       await waitForLoad(tabId)

@@ -34,6 +34,7 @@ import { createLogger } from '@/shared/logger'
 import { errorMessage, pause, sleep, uid, withTimeout } from '@/shared/util'
 import { ensureContentScript, formAgentFiles } from '@/shared/injection'
 import { closeWorkerWindow, openWorkerWindow } from '@/shared/windows'
+import { activity } from '@/shared/activity'
 
 const log = createLogger('runner')
 
@@ -194,6 +195,7 @@ async function clickApplyEntry(tabId: number, selectors: string[]): Promise<bool
 export async function applyToJob(jobId: string, options: ApplyOptions = {}): Promise<ApplyOutcome> {
   const step = (name: string, detail = '') => {
     options.onStep?.(name, detail)
+    activity.note(detail ? `${name} - ${detail}` : name)
     log.debug(`step: ${name}${detail ? ` (${detail})` : ''}`, undefined, jobId)
   }
 
@@ -316,7 +318,7 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       confidence = Math.min(confidence, resolved.confidence)
 
       if (resolved.plan.length > 0) {
-        step('fill', `${resolved.plan.length} field(s)`)
+        step('filling the form', `${resolved.plan.length} field(s), typed one at a time`)
         const fill = (
           await callAgent<Extract<FormResponse, { type: 'form:fill' }>>(tab, {
             type: 'form:fill',

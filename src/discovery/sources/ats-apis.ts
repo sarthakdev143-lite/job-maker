@@ -12,6 +12,7 @@ import { condenseDescription, detectWorkMode, parseSalary } from '@/shared/text'
 import { hashString, uid } from '@/shared/util'
 import type { Job, SearchRecipe } from '@/storage/schemas'
 import { createLogger } from '@/shared/logger'
+import { activity } from '@/shared/activity'
 
 const log = createLogger('discovery:ats')
 
@@ -87,6 +88,7 @@ export function dedupeHash(company: string, title: string, location: string): st
 }
 
 async function fetchJson<T>(url: string): Promise<T | null> {
+  activity.note(`fetching ${new URL(url).hostname}`)
   try {
     const res = await fetch(url, { headers: { accept: 'application/json' } })
     if (!res.ok) {

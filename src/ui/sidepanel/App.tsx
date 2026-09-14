@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { api, useAction, useAsync, useWorkerEvents } from '../shared/api'
+import { api, useAction, useLiveState, useWorkerEvents } from '../shared/api'
 import { Badge, ErrorBar, ProgressBar, Tabs } from '../shared/components'
 import Dashboard from './views/Dashboard'
 import JobsView from './views/JobsView'
@@ -20,17 +20,9 @@ type TabId = 'dashboard' | 'jobs' | 'review' | 'applications' | 'logs'
 
 export default function App() {
   const [tab, setTab] = useState<TabId>('dashboard')
-  const { state: pushed, tick } = useWorkerEvents(['evt:state', 'evt:jobs', 'evt:applications'])
-  const { data: polled, reload } = useAsync(() => api.getState(), [])
+  const { tick } = useWorkerEvents(['evt:jobs', 'evt:applications'])
+  const { state, reachable, reload } = useLiveState()
   const { run, busy, error, clearError } = useAction()
-
-  const state: AgentState | null = pushed ?? polled
-
-  // The worker can be evicted between broadcasts, so poll slowly as a backstop.
-  useEffect(() => {
-    const id = setInterval(reload, 15000)
-    return () => clearInterval(id)
-  }, [reload])
 
   useEffect(() => {
     if (tick > 0) reload()
@@ -65,7 +57,7 @@ export default function App() {
             <div className="min-w-0">
               <div className="truncate text-[13px] font-semibold">AutoApply</div>
               <div className="truncate text-[11px]" style={{ color: 'var(--ink-faint)' }}>
-                {state?.currentStep || phaseLabel(state)}
+                {!reachable ? 'background worker not responding' : state?.step?.detail || state?.currentStep || phaseLabel(state)}
               </div>
             </div>
           </div>
@@ -122,7 +114,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === 'dashboard' && <Dashboard state={state} onNavigate={setTab} />}
+        {tab === 'dashboard' && <Dashboard state={state} reachable={reachable} onNavigate={setTab} />}
         {tab === 'jobs' && <JobsView />}
         {tab === 'review' && <ReviewView />}
         {tab === 'applications' && <ApplicationsView />}

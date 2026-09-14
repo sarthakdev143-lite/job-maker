@@ -218,11 +218,25 @@ async function waitForComposer(timeoutMs = 20000): Promise<HTMLElement> {
  * beat before streaming starts); watching only text stability is not enough
  * (the stream pauses mid-answer). Together they are reliable in practice.
  */
-async function waitForReply(baselineCount: number, timeoutMs: number): Promise<string> {
+async function waitForReply(baselineCount: number, timeoutMs: number, requestId = ''): Promise<string> {
   const start = Date.now()
   let lastText = ''
   let stableSince = 0
   let sawNewNode = false
+  let lastReported = -1
+
+  /**
+   * Tell the worker how much text has arrived.
+   *
+   * A thirty-second reply with no outward sign is indistinguishable from a
+   * hang. Reporting the character count makes waiting visibly different from
+   * being stuck, which is the whole point.
+   */
+  const report = (chars: number, generating: boolean): void => {
+    if (chars === lastReported) return
+    lastReported = chars
+    void chrome.runtime.sendMessage({ type: 'ds:progress', requestId, chars, generating }).catch(() => {})
+  }
 
   while (Date.now() - start < timeoutMs) {
     const nodes = assistantNodes()
@@ -230,9 +244,13 @@ async function waitForReply(baselineCount: number, timeoutMs: number): Promise<s
       sawNewNode = true
       const node = nodes[nodes.length - 1]
       const text = (node?.innerText ?? '').trim()
+      report(text.length, true)
       if (text && text === lastText) {
         if (stableSince === 0) stableSince = Date.now()
-        else if (Date.now() - stableSince >= STABLE_MS && !isGenerating()) return text
+        else if (Date.now() - stableSince >= STABLE_MS && !isGenerating()) {
+          report(text.length, false)
+          return text
+        }
       } else {
         lastText = text
         stableSince = 0
@@ -248,7 +266,7 @@ async function waitForReply(baselineCount: number, timeoutMs: number): Promise<s
   throw Object.assign(new Error('DeepSeek reply timed out'), { code: 'timeout' })
 }
 
-async function sendPrompt(prompt: string, timeoutMs: number): Promise<string> {
+async function sendPrompt(prompt: string, timeoutMs: number, requestId = ''): Promise<string> {
   if (busy) throw Object.assign(new Error('Bridge is already handling a prompt'), { code: 'busy' })
   busy = true
   try {
@@ -272,7 +290,7 @@ async function sendPrompt(prompt: string, timeoutMs: number): Promise<string> {
       submitComposer(composer)
     }
 
-    const reply = await waitForReply(baseline, timeoutMs)
+    const reply = await waitForReply(baseline, timeoutMs, requestId)
     if (BUSY_PATTERNS.some((re) => re.test(reply)) && reply.length < 400) {
       throw Object.assign(new Error(`DeepSeek is rate limiting: ${reply.slice(0, 120)}`), { code: 'busy' })
     }
@@ -328,7 +346,7 @@ chrome.runtime.onMessage.addListener((msg: DeepSeekRequest, _sender, sendRespons
 
     case 'ds:send': {
       const { requestId, prompt, timeoutMs } = msg
-      void sendPrompt(prompt, timeoutMs).then(
+      void sendPrompt(prompt, timeoutMs, requestId).then(
         (text) => respond({ ok: true, type: 'ds:reply', requestId, text }),
         (e: Error & { code?: DeepSeekResponse extends { code?: infer C } ? C : never }) =>
           respond({ ok: false, error: e.message, code: (e as { code?: 'not_ready' | 'not_logged_in' | 'timeout' | 'busy' | 'dom_changed' }).code })

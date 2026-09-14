@@ -36,6 +36,8 @@ import { createLogger, setLogBroadcaster } from '@/shared/logger'
 import { err, ok, type BroadcastEvent, type UiRequest } from '@/shared/messages'
 import { errorMessage } from '@/shared/util'
 import { formAgentFiles } from '@/shared/injection'
+import { activity } from '@/shared/activity'
+import type { DeepSeekProgress } from '@/shared/messages'
 
 const log = createLogger('worker')
 
@@ -271,6 +273,23 @@ async function route(msg: UiRequest): Promise<unknown> {
     }
   }
 }
+
+/**
+ * Streaming progress from the DeepSeek bridge.
+ *
+ * A reply that takes thirty seconds is indistinguishable from a hang unless
+ * something is visibly moving, so the bridge reports how much text has arrived
+ * and that becomes the liveness signal the panel watches.
+ */
+chrome.runtime.onMessage.addListener((msg: DeepSeekProgress) => {
+  if (!msg || msg.type !== 'ds:progress') return false
+  activity.note(
+    msg.generating
+      ? `DeepSeek is replying (${msg.chars} characters so far)`
+      : `DeepSeek finished replying (${msg.chars} characters)`
+  )
+  return false
+})
 
 chrome.runtime.onMessage.addListener((msg: UiRequest, _sender, sendResponse) => {
   if (!msg || typeof msg !== 'object' || !String(msg.type ?? '').startsWith('ui:')) return false

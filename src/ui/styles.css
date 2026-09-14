@@ -268,3 +268,14 @@ body {
   border-radius: 999px;
   animation: slide 1.4s ease-in-out infinite;
 }
+
+/* The live-status dot: proof of life without a spinner's busy-ness. */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}

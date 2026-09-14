@@ -15,6 +15,7 @@ import { StructuredParseError, parseStructured, retryInstruction } from './struc
 import { getSettings } from '@/storage/settings'
 import { createLogger } from '@/shared/logger'
 import { errorMessage, sleep } from '@/shared/util'
+import { activity } from '@/shared/activity'
 import type { LlmConfig } from '@/storage/schemas'
 import type { TypeOf, ZodTypeAny } from 'zod'
 
@@ -75,6 +76,7 @@ class LlmBroker {
   private enqueue<T>(label: string, run: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.queue.push({ label, run, resolve, reject } as QueueTask<unknown>)
+      if (this.queue.length > 1) activity.note(`queued behind ${this.queue.length - 1} other model request(s)`)
       void this.drain()
     })
   }
@@ -201,7 +203,10 @@ class LlmBroker {
     for (let i = 0; i <= retries; i++) {
       try {
         const started = Date.now()
+        activity.note(`asking the model: ${label}`)
         const text = await driver.complete(req)
+        const seconds = ((Date.now() - started) / 1000).toFixed(1)
+        activity.note(`model answered in ${seconds}s (${text.length} characters)`)
         log.debug(`${label} completed in ${Date.now() - started}ms`, { chars: text.length })
         return text
       } catch (e) {

@@ -190,3 +190,68 @@ export function useAction(): {
 export async function download(dataUrl: string, fileName: string): Promise<void> {
   await chrome.downloads.download({ url: dataUrl, filename: fileName, saveAs: true })
 }
+
+/* ------------------------------------------------------------ live state */
+
+/**
+ * A ticking clock for elapsed-time displays.
+ *
+ * The worker only pushes state when something changes; a step that is legitimately
+ * taking forty seconds would otherwise render as a frozen "0s". Ticking locally
+ * keeps the number moving without any traffic.
+ */
+export function useNow(intervalMs = 500): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(id)
+  }, [intervalMs])
+  return now
+}
+
+/**
+ * The agent's state, kept live.
+ *
+ * Combines pushed updates with polling, because the two answer different
+ * questions: a push says what changed, and a successful poll proves the service
+ * worker is still alive at all. A failed poll is itself the signal that the
+ * agent is genuinely stuck rather than merely busy.
+ */
+export function useLiveState(): { state: AgentState | null; reachable: boolean; reload: () => void } {
+  const [state, setState] = useState<AgentState | null>(null)
+  const [reachable, setReachable] = useState(true)
+  const [nonce, setNonce] = useState(0)
+
+  const fetchState = useCallback(async () => {
+    try {
+      setState(await api.getState())
+      setReachable(true)
+    } catch {
+      setReachable(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const listener = (msg: BroadcastEvent) => {
+      if (msg?.type === 'evt:state') {
+        setState(msg.state)
+        setReachable(true)
+      }
+    }
+    chrome.runtime.onMessage.addListener(listener)
+    return () => chrome.runtime.onMessage.removeListener(listener)
+  }, [])
+
+  useEffect(() => {
+    void fetchState()
+  }, [fetchState, nonce])
+
+  // Poll briskly while it is working, sparingly when it is not.
+  const running = state?.running ?? false
+  useEffect(() => {
+    const id = setInterval(fetchState, running ? 2000 : 8000)
+    return () => clearInterval(id)
+  }, [fetchState, running])
+
+  return { state, reachable, reload: useCallback(() => setNonce((n) => n + 1), []) }
+}

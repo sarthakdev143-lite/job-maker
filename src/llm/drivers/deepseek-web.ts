@@ -18,6 +18,7 @@ import { createLogger } from '@/shared/logger'
 import { sleep, uid, withTimeout } from '@/shared/util'
 import { deepseekBridgeFiles, ensureContentScript, waitForTabComplete } from '@/shared/injection'
 import { openWorkerWindow } from '@/shared/windows'
+import { activity } from '@/shared/activity'
 
 const log = createLogger('llm:deepseek')
 
@@ -189,6 +190,8 @@ export class DeepSeekWebDriver implements LlmDriver {
     const prompt = req.system ? `${req.system}\n\n---\n\n${req.prompt}` : req.prompt
     const timeoutMs = req.timeoutMs ?? this.config.requestTimeoutMs
     const requestId = uid('req')
+
+    activity.note('sent the prompt to DeepSeek, waiting for a reply')
 
     let res: DeepSeekResponse
     try {
