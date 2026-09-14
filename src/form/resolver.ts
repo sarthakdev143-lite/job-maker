@@ -10,13 +10,15 @@
  *   2. Canonical matcher  - the eighty percent of questions everyone asks
  *   3. Answer bank        - anything this user has answered before
  *   4. Model (batched)    - genuinely novel questions, one call for the page
- *   5. Park               - unresolved, or answered with low confidence
+ *   5. Guess              - a defensible answer, so no mandatory box is blank
+ *   6. Park               - only what must not be guessed at
  *
  * Tiers 0-3 are free and instant. On a mature answer bank most forms never
  * reach tier 4 at all, which is the whole point of the design.
  */
 
 import { answerCanonical, canonicalKeyFor, isDocumentKey, type CanonicalKey } from './canonical'
+import { guessAnswer } from './guess'
 import { adapterById } from '@/sites/registry'
 import { lookup as bankLookup, promptDigest, remember, touch } from '@/storage/answer-bank'
 import { llm } from '@/llm/broker'
@@ -186,10 +188,44 @@ export async function resolveFields(ctx: ResolveContext): Promise<ResolveResult>
     }
   }
 
+  // Tier 5: guess, rather than leave a mandatory question blank.
+  //
+  // A form submitted with an unanswered required question is rejected outright
+  // by most ATSs, so a plausible answer is strictly better than none. What must
+  // not be guessed at -- sponsorship, work authorization, credentials -- is
+  // filtered out inside guessAnswer and still parks here.
+  const stillUnresolved: FieldDescriptor[] = []
+  if (settings.autonomy.answerEverything) {
+    for (const field of unresolved) {
+      const guess = guessAnswer(field, profile, ctx.job)
+      if (!guess || !isCompatible(guess.value, field)) {
+        stillUnresolved.push(field)
+        continue
+      }
+      plan.push({
+        selector: field.selector,
+        label: field.label,
+        kind: field.kind,
+        value: coerceToField(guess.value, field),
+        confidence: guess.confidence,
+        source: 'guess',
+        reasoning: guess.reasoning,
+        verified: false,
+        error: '',
+        required: field.required,
+      })
+    }
+  } else {
+    stillUnresolved.push(...unresolved)
+  }
+
+  const guessed = plan.filter((f) => f.source === 'guess').length
+  if (guessed > 0) log.info(`Guessed ${guessed} answer(s) rather than leave them blank`)
+
   return {
     plan,
-    unresolved,
-    confidence: planConfidence(plan, unresolved),
+    unresolved: stillUnresolved,
+    confidence: planConfidence(plan, stillUnresolved),
     documentTargets,
     coverLetterTargets,
     llmCalls,

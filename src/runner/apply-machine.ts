@@ -361,6 +361,26 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
         await sleep(900)
       }
 
+      // --- never move on from an unanswered mandatory question -------------
+      //
+      // On a chatbot-style flow the "next" control is often the submit control
+      // too, so advancing past a blank required question does not leave it for
+      // later -- it sends the application without it, and the site rejects the
+      // whole thing as incomplete.
+      const requiredStillBlank = resolved.unresolved.filter((f) => f.required)
+      if (requiredStillBlank.length > 0 && settings.autonomy.requireAllRequiredFields) {
+        await applicationsRepo.addTimeline(
+          application.id,
+          'wizard',
+          `stopped before advancing: ${requiredStillBlank.length} mandatory question(s) unanswered (${requiredStillBlank
+            .slice(0, 3)
+            .map((f) => f.label || f.selector)
+            .join(', ')})`,
+          'warn'
+        )
+        break
+      }
+
       // --- advance a wizard, or stop ---------------------------------------
       if (!detect.multiStep) break
       const advance = await callAgent<Extract<FormResponse, { type: 'form:advanceStep' }>>(tab, {
@@ -374,6 +394,25 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       tab.frameId = await pickFormFrame(tab.tabId)
       harvest = await harvestStep(tab)
       stepIndex++
+    }
+
+    // --- refuse to submit a form we never filled ---------------------------
+    //
+    // A page with no fillable fields is not an application, whatever the
+    // adapter thought. Clicking its apply button would send an empty
+    // application or, worse, something the site fills in on its own.
+    if (allPlan.length === 0 && allUnresolved.length === 0) {
+      const reason =
+        'No form fields found on this page. It is probably a job advert rather than an application form, ' +
+        'or the real form is behind a login.'
+      await finishAsSkipped(application.id, reason)
+      await jobsRepo.update(job.id, { status: 'skipped', rejectReason: reason })
+      log.warn(`${job.company}: ${reason}`, undefined, job.id)
+      return {
+        application: (await applicationsRepo.get(application.id))!,
+        decision: { action: 'skip', reasons: [reason] },
+        submitted: false,
+      }
     }
 
     // --- gate --------------------------------------------------------------
@@ -508,6 +547,15 @@ export async function submitApprovedApplication(
 
   const settings = await getSettings()
   const plan = mergeEdits(application.fillPlan, edits)
+
+  // Approving an empty plan would click submit on a form nothing was typed
+  // into. Refuse rather than send a blank application in the user's name.
+  if (plan.length === 0) {
+    const reason = 'Nothing was filled in, so there is nothing to submit. This page had no application form.'
+    await applicationsRepo.update(applicationId, { status: 'skipped', error: reason })
+    return { application: (await applicationsRepo.get(applicationId))!, decision: { action: 'skip', reasons: [reason] }, submitted: false }
+  }
+
   let tab: WorkerTab | null = null
 
   try {

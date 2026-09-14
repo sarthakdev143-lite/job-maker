@@ -196,6 +196,13 @@ export const AutonomySchema = z.object({
   minFillConfidence: z.number().default(0.85),
   /** Unresolved required fields park the application regardless of mode. */
   requireAllRequiredFields: z.boolean().default(true),
+  /**
+   * Answer every mandatory question, guessing the most defensible option when
+   * nothing else can. A blank mandatory field is not a cautious application,
+   * it is a rejected one. Questions about work authorization, sponsorship and
+   * credentials are never guessed at, whatever this says.
+   */
+  answerEverything: z.boolean().default(true),
   maxApplicationsPerDay: z.number().default(15),
   perSiteDailyCap: z.record(z.string(), z.number()).default({
     greenhouse: 20,
@@ -395,6 +402,8 @@ export const FillSourceSchema = z.enum([
   'profile',
   'user',
   'default',
+  /** Last-resort answer chosen so a mandatory question is not left blank. */
+  'guess',
 ])
 
 export const FilledFieldSchema = z.object({

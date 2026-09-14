@@ -14,6 +14,7 @@
 import { orchestrator } from './orchestrator'
 import { runDiscovery } from '@/discovery'
 import { setUpSearchesFromProfile } from '@/discovery/setup'
+import { startAutopilot } from './autopilot'
 import { applyToJob, dryRunUrl, submitApprovedApplication } from '@/runner/apply-machine'
 import { llm } from '@/llm/broker'
 import { answersRepo, applicationsRepo, dbStats, docsRepo, jobsRepo, logsRepo } from '@/storage/db'
@@ -37,6 +38,7 @@ import { err, ok, type BroadcastEvent, type UiRequest } from '@/shared/messages'
 import { errorMessage } from '@/shared/util'
 import { formAgentFiles } from '@/shared/injection'
 import { activity } from '@/shared/activity'
+import { BUILD_ID } from '@/shared/build'
 import type { DeepSeekProgress } from '@/shared/messages'
 
 const log = createLogger('worker')
@@ -184,6 +186,12 @@ async function route(msg: UiRequest): Promise<unknown> {
     case 'ui:preflight':
       return orchestrator.preflight()
 
+    case 'ui:autopilot': {
+      const result = await startAutopilot()
+      broadcast({ type: 'evt:jobs' })
+      return result
+    }
+
     case 'ui:startAgent':
       return orchestrator.start()
 
@@ -267,9 +275,16 @@ async function route(msg: UiRequest): Promise<unknown> {
     case 'ui:dryRunUrl':
       return dryRunUrl(msg.url)
 
+    case 'ui:version':
+      return { build: BUILD_ID }
+
     default: {
       const exhaustive: never = msg
-      throw new Error(`Unhandled request: ${JSON.stringify(exhaustive)}`)
+      // Naming the build matters: nine times in ten this is not a missing
+      // handler but a worker Chrome never restarted after a rebuild.
+      throw new Error(
+        `Unhandled request: ${JSON.stringify(exhaustive)} (background worker build ${BUILD_ID})`
+      )
     }
   }
 }

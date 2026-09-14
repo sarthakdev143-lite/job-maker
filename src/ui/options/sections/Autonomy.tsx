@@ -110,6 +110,12 @@ export default function AutonomySection({
           label="Never submit with an unanswered required field"
           description="Leave this on. A form with a blank required question fails validation anyway."
         />
+        <Toggle
+          checked={a.answerEverything}
+          onChange={(v) => set({ answerEverything: v })}
+          label="Answer every mandatory question, guessing when necessary"
+          description="Picks the most defensible option rather than leaving a box blank - your city for a location question, the neutral option, or agreement where applying implies it. Sponsorship, work authorization and credential questions are never guessed and still park for you."
+        />
       </Section>
 
       <Section title="Volume" description="Caps are absolute and counted per day, whatever the thresholds say.">

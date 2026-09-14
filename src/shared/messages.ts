@@ -43,6 +43,8 @@ export type UiRequest =
   | { type: 'ui:rejectApplication'; id: string }
   | { type: 'ui:retryApplication'; id: string }
   | { type: 'ui:preflight' }
+  | { type: 'ui:autopilot' }
+  | { type: 'ui:version' }
   | { type: 'ui:startAgent' }
   | { type: 'ui:stopAgent' }
   | { type: 'ui:killSwitch' }
@@ -193,8 +195,24 @@ export function err(error: string): Err {
 export async function sendToWorker<T = unknown>(msg: UiRequest): Promise<T> {
   const res = (await chrome.runtime.sendMessage(msg)) as Result<T> | undefined
   if (!res) throw new Error('No response from background worker')
-  if (!res.ok) throw new Error(res.error)
+  if (!res.ok) throw new Error(explainWorkerError(res.error))
   return res.data
+}
+
+/**
+ * Chrome can serve a freshly built panel while still running the previously
+ * registered background worker, which answers new messages with "Unhandled
+ * request" -- a message that reads like a bug in the extension when it is
+ * really just a missed reload. Say what to do instead.
+ */
+export function explainWorkerError(error: string): string {
+  if (/^Unhandled request/.test(error)) {
+    return (
+      'The background worker is running an older build of the extension. ' +
+      'Open chrome://extensions and press Reload on this extension, then reopen this panel.'
+    )
+  }
+  return error
 }
 
 /** Typed wrapper around chrome.tabs.sendMessage for worker -> content script. */

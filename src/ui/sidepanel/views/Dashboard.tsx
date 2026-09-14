@@ -12,6 +12,7 @@ import { useState } from 'react'
 import { api, openSettings, useAction, useAsync, type PreflightCheck } from '../../shared/api'
 import { Badge, ConfirmButton, Empty, Spinner, Stat } from '../../shared/components'
 import NowCard from './NowCard'
+import Autopilot from './Autopilot'
 import { formatRelative } from '@/shared/util'
 import type { AgentState } from '@/shared/messages'
 
@@ -39,6 +40,16 @@ export default function Dashboard({
     <div>
       <NowCard state={state} reachable={reachable} onRecheck={recheck} />
 
+      {/* The shortest path from installed to applying, offered until it is. */}
+      {!running && (stats?.submittedTotal ?? 0) === 0 && (
+        <Autopilot
+          onDone={() => {
+            recheck()
+            reload()
+          }}
+        />
+      )}
+
       {blockers.length > 0 && !running && (
         <div className="mb-3 rounded-md px-3 py-2.5" style={{ background: 'var(--bad-soft)' }}>
           <p className="text-[12.5px] font-medium" style={{ color: 'var(--bad)' }}>
@@ -62,9 +73,11 @@ export default function Dashboard({
                   run(async () => {
                     const result = await api.setupSearches()
                     setSetupNote(
-                      result.needsManual
-                        ? 'The model would not name any boards it was sure of. Open Searches and add one by hand.'
-                        : `Created and switched on — ${result.created.join('; ')}`
+                      [
+                        `Checked ${result.boardsChecked} company boards, ${result.boardsLive} are live.`,
+                        result.needsManual ? 'None responded - add one by hand in Searches.' : result.created.join('; '),
+                        ...result.notes,
+                      ].join(' ')
                     )
                     recheck()
                     reload()

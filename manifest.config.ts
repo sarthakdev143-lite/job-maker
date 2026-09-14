@@ -1,6 +1,13 @@
 import { defineManifest } from '@crxjs/vite-plugin'
 import pkg from './package.json'
 
+/** Local wall-clock, so it can be compared against "when did I last build?". */
+function buildStamp(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
 /**
  * Domains the form agent is injected into by default. Users can add more at
  * runtime from the options page; those are registered with
@@ -39,6 +46,9 @@ export default defineManifest({
   name: 'AutoApply - autonomous job agent',
   short_name: 'AutoApply',
   version: pkg.version,
+  // Shown on the chrome://extensions card, so which build Chrome actually has
+  // loaded is readable without opening the extension at all.
+  version_name: `${pkg.version} (build ${buildStamp()})`,
   description:
     'Discovers, scores, tailors and submits job applications autonomously, behind a confidence gate you control.',
   minimum_chrome_version: '116',

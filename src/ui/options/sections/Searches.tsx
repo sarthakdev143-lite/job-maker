@@ -39,11 +39,11 @@ export default function SearchesSection() {
     run(async () => {
       setSetupSummary(null)
       const result = await api.setupSearches()
-      setSetupSummary(
-        result.needsManual
-          ? ['Nothing could be built automatically - the model would not name boards it was confident about. Add one by hand below.']
-          : result.created
-      )
+      setSetupSummary([
+        `Checked ${result.boardsChecked} company boards against their live APIs - ${result.boardsLive} responded.`,
+        ...(result.needsManual ? ['None of them are open right now. Add a company by hand below.'] : result.created),
+        ...result.notes,
+      ])
       reload()
     }, 'setting up')
 

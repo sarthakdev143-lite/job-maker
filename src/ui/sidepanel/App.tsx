@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { api, useAction, useLiveState, useWorkerEvents } from '../shared/api'
+import { api, useAction, useBuildMatch, useLiveState, useWorkerEvents } from '../shared/api'
 import { Badge, ErrorBar, ProgressBar, Tabs } from '../shared/components'
 import Dashboard from './views/Dashboard'
 import JobsView from './views/JobsView'
@@ -23,6 +23,7 @@ export default function App() {
   const { tick } = useWorkerEvents(['evt:jobs', 'evt:applications'])
   const { state, reachable, reload } = useLiveState()
   const { run, busy, error, clearError } = useAction()
+  const build = useBuildMatch()
 
   useEffect(() => {
     if (tick > 0) reload()
@@ -93,6 +94,21 @@ export default function App() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         <ErrorBar message={error || state?.lastError || ''} onDismiss={clearError} />
+
+        {build.stale && (
+          <div
+            className="mb-3 flex items-center justify-between gap-2 rounded-md px-3 py-2 text-[12px]"
+            style={{ background: 'var(--bad-soft)', color: 'var(--bad)' }}
+          >
+            <span>
+              Chrome is still running an older background worker, so nothing you press here will reach it. Reload the
+              extension.
+            </span>
+            <button className="btn btn-sm" style={{ color: 'inherit' }} onClick={() => chrome.runtime.reload()}>
+              Reload
+            </button>
+          </div>
+        )}
 
         {state && state.llmHealth !== 'ok' && state.llmHealth !== 'unknown' && (
           <div

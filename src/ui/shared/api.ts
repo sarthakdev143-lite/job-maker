@@ -8,8 +8,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sendToWorker } from '@/shared/messages'
+import { BUILD_ID } from '@/shared/build'
 import type { PreflightCheck } from '@/background/orchestrator'
 import type { SetupResult } from '@/discovery/setup'
+import type { AutopilotResult } from '@/background/autopilot'
 import type { AgentState, BroadcastEvent, UiRequest } from '@/shared/messages'
 import type {
   AnswerBankEntry,
@@ -47,6 +49,8 @@ export const api = {
   reject: (id: string) => sendToWorker<unknown>({ type: 'ui:rejectApplication', id }),
   retry: (id: string) => sendToWorker<unknown>({ type: 'ui:retryApplication', id }),
   preflight: () => sendToWorker<PreflightCheck[]>({ type: 'ui:preflight' }),
+  autopilot: () => sendToWorker<AutopilotResult>({ type: 'ui:autopilot' }),
+  version: () => sendToWorker<{ build: string }>({ type: 'ui:version' }),
   start: () => sendToWorker<AgentState>({ type: 'ui:startAgent' }),
   stop: () => sendToWorker<AgentState>({ type: 'ui:stopAgent' }),
   kill: () => sendToWorker<AgentState>({ type: 'ui:killSwitch' }),
@@ -78,7 +82,7 @@ export type ResumeImportResult = {
   seeded: number
 }
 
-export type { PreflightCheck, SetupResult }
+export type { PreflightCheck, SetupResult, AutopilotResult }
 
 /** Open the settings page at a particular section. */
 export function openSettings(section?: string): void {
@@ -254,4 +258,38 @@ export function useLiveState(): { state: AgentState | null; reachable: boolean; 
   }, [fetchState, running])
 
   return { state, reachable, reload: useCallback(() => setNonce((n) => n + 1), []) }
+}
+
+
+/**
+ * Whether the background worker is the same build as this page.
+ *
+ * Chrome can serve a freshly rebuilt panel while keeping the service worker it
+ * registered before the rebuild, and every new message then comes back
+ * "unhandled" -- which reads like a broken extension rather than a missed
+ * reload. A worker old enough to lack the version handler simply fails the
+ * call, which is itself the answer.
+ */
+export function useBuildMatch(): { stale: boolean; worker: string | null; panel: string } {
+  const [worker, setWorker] = useState<string | null>(null)
+  const [stale, setStale] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    api.version().then(
+      (v) => {
+        if (!alive) return
+        setWorker(v.build)
+        setStale(v.build !== BUILD_ID)
+      },
+      () => {
+        if (alive) setStale(true)
+      }
+    )
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  return { stale, worker, panel: BUILD_ID }
 }
