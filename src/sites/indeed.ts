@@ -36,6 +36,20 @@ import type { FieldDescriptor } from '@/storage/schemas'
  */
 export type ApplyStep = 'contact' | 'resume' | 'questions' | 'review' | 'submitted' | 'other'
 
+/**
+ * The step paths observed on a real application, in the order they appeared:
+ *
+ *   /form/resume-selection-module/resume-selection   pick a stored resume
+ *   /form/questions-module/questions/1               employer screening questions
+ *   /form/resume-module/profile-education            confirm saved education
+ *   /form/resume-module/profile-work-experience      confirm saved experience
+ *   /form/review-module                              final review, then submit
+ *
+ * The entry point is /beta/indeedapply/applybyapplyablejobid, which redirects.
+ * Steps are skipped when the account already satisfies them, so this is a set
+ * of possibilities rather than a fixed sequence.
+ */
+
 export function classifyApplyStep(url: string): ApplyStep {
   let path: string
   try {
@@ -47,9 +61,18 @@ export function classifyApplyStep(url: string): ApplyStep {
   // Checked before the rest: the post-apply screen is a confirmation, and
   // mistaking it for another step would have the runner press on past it.
   if (/post-apply|application-submitted|\/confirmation/.test(path)) return 'submitted'
-  if (/review/.test(path)) return 'review'
+
+  // Deliberately narrow. A bare /review/ test also matched
+  // `/resume-module/profile-review`, an ordinary mid-flow step for checking
+  // saved profile details -- and treating that as the final screen is exactly
+  // the mistake `canSubmit` exists to prevent. Verified live: the real last
+  // step is `/beta/indeedapply/form/review-module`.
+  if (/(^|\/)review-module(\/|$)|\/review$|review-application/.test(path)) return 'review'
+
   if (/question|qualification|screener/.test(path)) return 'questions'
-  if (/resume|document/.test(path)) return 'resume'
+  // Covers both `resume-selection-module/resume-selection` and the
+  // `resume-module/profile-*` profile-confirmation steps.
+  if (/resume|document|work-experience|education/.test(path)) return 'resume'
   if (/contact-info|contact|profile|name/.test(path)) return 'contact'
   return 'other'
 }
@@ -96,13 +119,18 @@ export const indeedAdapter: SiteAdapter = {
     )
 
     if (!onForm) {
+      const hasIndeedApply = Boolean(
+        doc.querySelector('#indeedApplyButton, [data-testid^="indeedApplyButton"], .jobsearch-IndeedApplyButton')
+      )
       return {
         isApplicationForm: false,
         confidence: 0.15,
         jobTitle: title,
         company,
         multiStep: true,
-        detail: 'indeed job advert - the form is behind the apply button',
+        detail: hasIndeedApply
+          ? 'indeed job advert with Easy Apply - the form is behind the apply button'
+          : 'indeed job advert - applying redirects to the company site',
       }
     }
 
@@ -142,13 +170,20 @@ export const indeedAdapter: SiteAdapter = {
     return null
   },
 
+  /**
+   * Verified against a live listing: the control is
+   * `<button id="indeedApplyButton" data-testid="indeedApplyButton-test">`
+   * labelled "Apply with Indeed". The id is the reliable hook -- an exact
+   * `[data-testid="indeedApplyButton"]` match misses because of the `-test`
+   * suffix, so the prefix form is used instead.
+   */
   applyEntrySelectors: [
     '#indeedApplyButton',
-    '[data-testid="indeedApplyButton"]',
+    '[data-testid^="indeedApplyButton"]',
     '.jobsearch-IndeedApplyButton',
+    'button[id^="indeedApplyButton"]',
     '#applyButtonLinkContainer button',
     '#applyButtonLinkContainer a',
-    'button[id^="indeedApplyButton"]',
     'a[href*="/applystart"]',
     'button[aria-label*="Apply now" i]',
   ],
@@ -162,17 +197,30 @@ export const indeedAdapter: SiteAdapter = {
    * the runner only reaches that point deliberately.
    */
   nextStepSelectors: [
-    'button[data-testid="ia-continueButton"]',
     'button[data-testid="continue-button"]',
-    '.ia-continueButton',
+    'button[data-testid$="-continue-button"]',
+    'button[data-testid$="-save-button"]',
+    'button[data-testid="ia-continueButton"]',
     'button[type="submit"]',
   ],
 
+  /**
+   * Verified live: every profile-confirmation step ships a Skip beside its
+   * "Save and continue", named `<page>-skip-button`. It is the only way past a
+   * step whose stored profile data Indeed itself rejects.
+   */
+  skipSelectors: ['button[data-testid$="-skip-button"]'],
+
+  /**
+   * Verified live on the review screen: `submit-application-button`, labelled
+   * "Submit your application". The earlier guess of `submit-application` missed
+   * it by a suffix, and the generic text fallback missed it too because of the
+   * possessive -- so submission failed on the one page that mattered.
+   */
   submitSelectors: [
-    'button[data-testid="ia-continueButton"]',
+    'button[data-testid="submit-application-button"]',
+    'button[data-testid^="submit-application"]',
     'button[aria-label*="Submit" i]',
-    'button[data-testid="submit-application"]',
-    'button[type="submit"]',
   ],
 
   /**

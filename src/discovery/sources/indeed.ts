@@ -232,18 +232,34 @@ function scrapeIndeedCards(): ScrapedCard[] {
     seen.add(url)
 
     const cardText = text(card)
+    // Verified against live search results: the current card layout carries no
+    // Easy Apply badge at all, so this is a best-effort hint only. What settles
+    // it is the presence of Indeed's own apply button on the job page, which
+    // `hydrateIndeedJobs` checks below.
     const easyApply =
       Boolean(pick(card, ['[data-testid="indeedApply"]', '.ialbl', '.iaLabel', '[class*="indeedApply" i]'])) ||
-      /easily apply/i.test(cardText)
+      /easily apply|apply with indeed/i.test(cardText)
 
     out.push({
       title,
       company: text(pick(card, ['[data-testid="company-name"]', '.companyName', 'span.companyName'])),
       location: text(pick(card, ['[data-testid="text-location"]', '.companyLocation', '[class*="location" i]'])),
       url,
-      postedText: text(pick(card, ['[data-testid="myJobsStateDate"]', '.date', '[class*="date" i]'])),
+      // `timing-attribute` is what the live layout uses; the rest are older
+      // spellings kept as fallbacks.
+      postedText: text(
+        pick(card, ['[data-testid="timing-attribute"]', '[data-testid="myJobsStateDate"]', '.date'])
+      ),
+      // Salary has no test id of its own and lives in the metadata group, which
+      // also holds job-type chips. Over-capturing here is harmless: the text is
+      // only ever parsed for a number, and a chip without one yields nothing.
       salaryText: text(
-        pick(card, ['[data-testid="attribute_snippet_testid"]', '.salary-snippet-container', '.salaryOnly'])
+        pick(card, [
+          '[data-testid="attribute_snippet_testid"]',
+          '.salary-snippet-container',
+          '.metadataContainer',
+          '.jobMetaDataGroup',
+        ])
       ),
       snippet: text(pick(card, ['[data-testid="jobsnippet_footer"]', '.job-snippet', 'div.underShelfFooter'])),
       easyApply,
@@ -380,15 +396,22 @@ export async function hydrateIndeedJobs(jobs: Job[], limit = 40): Promise<Job[]>
 
         // The apply control tells us where this really goes. An Indeed-hosted
         // form keeps us on indeed.com; anything else is a company ATS.
+        // Verified live: the real control is a <button id="indeedApplyButton">
+        // labelled "Apply with Indeed", carrying data-testid
+        // "indeedApplyButton-test" -- note the suffix, which an exact-match
+        // selector misses. Only a company ATS gives us an href to follow.
         const applyEl = document.querySelector(
-          '#indeedApplyButton, [data-testid="indeedApplyButton"], #applyButtonLinkContainer a, .jobsearch-IndeedApplyButton, a[href*="/applystart"]'
+          '#indeedApplyButton, [data-testid^="indeedApplyButton"], .jobsearch-IndeedApplyButton, #applyButtonLinkContainer a, a[href*="/applystart"]'
         ) as HTMLAnchorElement | null
 
-        const applyHref = applyEl?.href ?? ''
+        const applyHref = applyEl instanceof HTMLAnchorElement ? applyEl.href : ''
         const pageText = (document.body?.innerText ?? '').slice(0, 4000)
         const easyApply =
-          Boolean(document.querySelector('#indeedApplyButton, [data-testid="indeedApplyButton"]')) ||
-          /easily apply/i.test(pageText)
+          Boolean(
+            document.querySelector(
+              '#indeedApplyButton, [data-testid^="indeedApplyButton"], .jobsearch-IndeedApplyButton'
+            )
+          ) || /easily apply|apply with indeed/i.test(pageText)
 
         return {
           description: description.slice(0, 20000),

@@ -119,13 +119,43 @@ filter on every generated URL and that phrases are never concatenated; the
 adapter tests pin the submit veto per step and that host matching cannot be
 fooled by `indeed.com.evil.test`.
 
+## Live verification
+
+A real application was walked end to end in a signed-in browser, stopping at
+the review screen without submitting. Most of the guessed markup was wrong, and
+three of the errors would each have produced a night of zero submissions:
+
+- **The submit button.** Guessed `submit-application`; the real one is
+  `submit-application-button`, labelled "Submit your application" — which the
+  generic `^submit( application)?$` text fallback also missed, because of the
+  possessive. Nothing would have submitted.
+- **The continue button.** Guessed `ia-continueButton`, which does not exist.
+  The real one is `continue-button`, and on the screening-questions step it is
+  a *randomly hashed* test id, reachable only by button text.
+- **Indeed re-validates its own stored profile mid-application.** "Review
+  education" and "Review work experience" appear partway through, and if a
+  saved item is missing a field Indeed requires, "Save and continue" silently
+  does nothing — wedging every application at 63% for ever. Each such page
+  ships a Skip button (`<page>-skip-button`), which is the only way past.
+  `advanceStep` now compares a step fingerprint before and after clicking
+  next, and takes the skip when the page refuses to move.
+
+Also corrected: the apply entry test id carries a `-test` suffix, so the exact
+match missed and the `#indeedApplyButton` id is the reliable hook; the apply
+button opens a **new tab** (confirming `adoptNewTab` was necessary); posted date
+is `timing-attribute`; the card layout carries **no Easy Apply badge at all**, so
+that signal is derived during hydration from the job page instead; and the
+screening-questions step carries an invisible reCAPTCHA, which passed silently
+for a signed-in session.
+
+The step classifier was also tightened: a bare `/review/` test matched
+`/resume-module/profile-review`, an ordinary mid-flow step, which would have
+authorised submission in the middle of the wizard.
+
 ## Known limits
 
-- Selectors were written from known Indeed markup, not captured live: the
-  Claude-in-Chrome extension was not connected and the Playwright MCP server
-  failed to connect. They are layered (stable `data-testid`, then older
-  semantic class, then structural fallback) to survive rotation, but a live
-  verification pass is still owed.
+- Verified against one posting on `www.indeed.com`. Indeed ships layouts
+  concurrently, so other postings may differ; selectors stay layered.
 - Realistic throughput is roughly 60–150 applications overnight, not several
   hundred; the ceiling is the serialised model session and page load times.
 - Automated applying is against Indeed's terms of service. The realistic

@@ -50,6 +50,20 @@ export interface SiteAdapter {
   canSubmit?(doc: Document, url: string): boolean
   /** Buttons that advance a multi-step form without submitting. */
   nextStepSelectors?: string[]
+  /**
+   * Controls that step past a page the normal button refuses to leave.
+   *
+   * Indeed re-validates the user's saved Indeed profile partway through every
+   * Easy Apply -- "Review education", "Review work experience" -- and if any
+   * stored item is missing a field it requires, "Save and continue" silently
+   * does nothing. Verified live: a profile with two incomplete education
+   * entries wedges every application at 63% for ever. Each of those pages ships
+   * a "Skip" button beside it, and taking it is the difference between an
+   * overnight run that submits and one that parks every job.
+   *
+   * Only used after a normal advance has been tried and left the page unchanged.
+   */
+  skipSelectors?: string[]
   /** Elements whose presence proves the submission landed. */
   successSelectors?: string[]
   /** Page text that proves the submission landed. */
@@ -81,8 +95,14 @@ export const COMMON_ERROR_SELECTORS = [
 ]
 
 /** Buttons that look like a submit control when no adapter selector matches. */
+/**
+ * Indeed's final button reads "Submit your application", which an exact
+ * `^submit( application)?$` match missed entirely -- so the fallback found no
+ * submit control on the one page where it mattered. The possessive is now
+ * optional rather than fatal.
+ */
 export const GENERIC_SUBMIT_TEXT =
-  /^(submit( application)?|send application|apply( now)?|finish|complete application)$/i
+  /^(submit( (your|this) )?( application)?|submit application|send( my)? application|apply( now)?|finish|complete application)$/i
 
 export const GENERIC_NEXT_TEXT = /^(next|continue|save and continue|next step|proceed)$/i
 

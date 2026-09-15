@@ -45,6 +45,39 @@ function clickableSubmit(): { el: HTMLElement; selector: string } | null {
   return byText ? { el: byText, selector: '(matched by button text)' } : null
 }
 
+/**
+ * A cheap fingerprint of the step currently on screen.
+ *
+ * Used to tell a wizard that moved from one that quietly refused to. Indeed's
+ * "Save and continue" does nothing at all when the user's stored profile fails
+ * its validation, with no thrown error and no navigation -- so the only way to
+ * know is to look at the page before and after.
+ */
+function stepSignature(): string {
+  const heading = (document.querySelector('h1, h2')?.textContent ?? '').trim().slice(0, 80)
+  const fields = Array.from(document.querySelectorAll('input:not([type="hidden"]), textarea, select'))
+    .map((el) => el.getAttribute('name') ?? el.id ?? '')
+    .join('|')
+  return `${location.pathname}::${heading}::${fields}`.slice(0, 600)
+}
+
+/** A control that steps past a page the normal next button will not leave. */
+function clickableSkip(): { el: HTMLElement; selector: string } | null {
+  const adapter = adapterForUrl(location.href)
+  for (const sel of adapter.skipSelectors ?? []) {
+    try {
+      const el = document.querySelector<HTMLElement>(sel)
+      if (el && !(el as HTMLButtonElement).disabled) return { el, selector: sel }
+    } catch {
+      // Keep looking.
+    }
+  }
+  const byText = Array.from(document.querySelectorAll<HTMLElement>('button, a[role="button"]')).find(
+    (el) => /^skip( for now| this step)?$/i.test((el.innerText ?? '').trim())
+  )
+  return byText ? { el: byText, selector: '(skip matched by text)' } : null
+}
+
 function clickableNext(): { el: HTMLElement; selector: string } | null {
   const adapter = adapterForUrl(location.href)
   for (const sel of adapter.nextStepSelectors ?? []) {
@@ -213,13 +246,43 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
     }
 
     case 'form:advanceStep': {
+      const before = stepSignature()
       const next = clickableNext()
-      if (!next) return { ok: true, type: 'form:advanceStep', advanced: false, detail: 'no next control' }
-      next.el.scrollIntoView({ block: 'center' })
+
+      if (next) {
+        next.el.scrollIntoView({ block: 'center' })
+        await sleep(250)
+        next.el.click()
+        await sleep(1200) // let the wizard render the following step
+        if (stepSignature() !== before) {
+          return { ok: true, type: 'form:advanceStep', advanced: true, detail: next.selector }
+        }
+      }
+
+      // The page did not move. On Indeed that means its own stored profile
+      // failed validation on a step we did not fill and cannot fix from here,
+      // and the page offers a way past it. Taking that beats parking the job.
+      const skip = clickableSkip()
+      if (!skip) {
+        return {
+          ok: true,
+          type: 'form:advanceStep',
+          advanced: false,
+          detail: next ? `${next.selector} did not move the form` : 'no next control',
+        }
+      }
+
+      skip.el.scrollIntoView({ block: 'center' })
       await sleep(250)
-      next.el.click()
-      await sleep(1200) // let the wizard render the following step
-      return { ok: true, type: 'form:advanceStep', advanced: true, detail: next.selector }
+      skip.el.click()
+      await sleep(1200)
+      const moved = stepSignature() !== before
+      return {
+        ok: true,
+        type: 'form:advanceStep',
+        advanced: moved,
+        detail: moved ? `skipped past a blocked step (${skip.selector})` : 'neither continue nor skip moved the form',
+      }
     }
 
     case 'form:verifySubmission':
