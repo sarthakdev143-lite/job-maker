@@ -22,8 +22,16 @@ import type { AgentState } from '@/shared/messages'
 
 const log = createLogger('autopilot')
 
-/** Sources the agent can genuinely submit through, unattended. */
-const APPLYABLE_SOURCES = new Set(['greenhouse', 'lever', 'ashby'])
+/**
+ * Sources the agent can genuinely submit through, unattended.
+ *
+ * Indeed is in this set now. It was excluded on the grounds that its listings
+ * are login-gated adverts, which was true of the old discovery-only stub but is
+ * no longer: the adapter drives Indeed's own Easy Apply wizard, and for
+ * listings that redirect to a company ATS the discovery pass resolves the real
+ * form URL up front so the runner opens that directly.
+ */
+const APPLYABLE_SOURCES = new Set(['indeed', 'greenhouse', 'lever', 'ashby'])
 
 export type AutopilotResult = {
   started: boolean
@@ -59,10 +67,14 @@ export async function startAutopilot(): Promise<AutopilotResult> {
   }
 
   // --- somewhere real to apply ----------------------------------------------
+  //
+  // Indeed needs no board slugs, so a failed board check is no longer fatal: it
+  // costs the secondary ATS stream, not the run. Refusing to start over it was
+  // the difference between an agent that works and an error message.
   const setup = await setUpSearchesFromProfile()
   if (setup.boardsLive === 0) {
-    throw new Error(
-      'None of the company boards responded, so there is nowhere to apply. Add one by hand in Settings > Searches.'
+    problems.push(
+      'No company board responded, so this run is Indeed-only. Add a board by hand in Settings > Searches for more volume.'
     )
   }
 
@@ -95,29 +107,56 @@ export async function startAutopilot(): Promise<AutopilotResult> {
     autonomy: {
       ...settings.autonomy,
       enabled: true,
-      mode: 'gated',
-      // Lower than the cautious default: a threshold nothing clears is the same
-      // as an agent that never applies.
-      minMatchScore: Math.min(settings.autonomy.minMatchScore, 50),
+      // 'full' rather than 'gated': the match threshold is meaningless with the
+      // scorer switched off, and a gate configured against a score nothing
+      // produces parks every application instead of sending it.
+      mode: 'full',
+      volumeMode: true,
+      minMatchScore: 0,
       // Guessed answers are honest about being guesses and carry middling
       // confidence, so the threshold has to sit below them or every form with
       // one unusual question parks instead of going out.
-      minFillConfidence: Math.min(settings.autonomy.minFillConfidence, 0.5),
+      minFillConfidence: Math.min(settings.autonomy.minFillConfidence, 0.4),
       requireAllRequiredFields: true,
       answerEverything: true,
-      maxApplicationsPerDay: Math.max(settings.autonomy.maxApplicationsPerDay, 25),
+      // High enough not to be the thing that ends an overnight run. The real
+      // limits are how fast pages load and how tolerant the sites are.
+      maxApplicationsPerDay: Math.max(settings.autonomy.maxApplicationsPerDay, 400),
+      perSiteDailyCap: { ...settings.autonomy.perSiteDailyCap, indeed: 300, generic: 100 },
       // Round the clock: the window exists to avoid odd-hours submissions, and
       // someone asking for this explicitly has decided that is not a concern.
       activeDays: [0, 1, 2, 3, 4, 5, 6],
       activeHours: { start: 0, end: 0 },
+      // Tight enough for volume, still jittered so the pacing is not metronomic.
+      delayBetweenApplicationsMs: { min: 10_000, max: 25_000 },
+      // A run that hits a patch of awkward forms at 2am should push past it
+      // rather than stopping for the night after three.
+      circuitBreakerFailures: Math.max(settings.autonomy.circuitBreakerFailures, 10),
+      // Hundreds of desktop notifications overnight is not a feature.
+      notifyOnSubmit: false,
+      notifyOnReviewNeeded: false,
+    },
+    documents: {
+      ...settings.documents,
+      // Both of these are model calls on the critical path of every single
+      // application. Off, the resume PDF is still rendered locally from the
+      // profile -- it is just not rewritten per posting.
+      tailorResume: false,
+      generateCoverLetter: false,
     },
     enabledSites: {
       ...settings.enabledSites,
+      indeed: true,
       greenhouse: true,
       lever: true,
       ashby: true,
       workable: true,
       smartrecruiters: true,
+      workday: true,
+      // Indeed redirects to plenty of ATSes with no dedicated adapter. The
+      // generic one handles ordinary forms, and refusing them outright would
+      // discard a large share of the listings.
+      generic: true,
     },
   })
 
@@ -129,7 +168,8 @@ export async function startAutopilot(): Promise<AutopilotResult> {
   }
 
   log.info(
-    `Autopilot: ${setup.boardsLive} live board(s), ${setup.created.length} search(es), gated at ${configured.autonomy.minMatchScore}`
+    `Autopilot: Indeed-first, ${setup.created.length} search(es), ${setup.boardsLive} live board(s), ` +
+      `volume mode, cap ${configured.autonomy.maxApplicationsPerDay}/day`
   )
 
   const state = await orchestrator.start()

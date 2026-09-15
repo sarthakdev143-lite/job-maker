@@ -1,74 +1,20 @@
 /**
- * Indeed and Naukri.
+ * Naukri.
  *
- * Both are treated primarily as discovery surfaces rather than apply surfaces,
- * for different reasons:
+ * Naukri is permissive about automation but its apply flow is often a single
+ * button plus a chatbot that asks follow-up questions in a drawer, and both
+ * need a signed-in session. The adapter recognises the drawer, which is the
+ * only part of the flow this agent can actually fill.
  *
- * - Indeed fingerprints automation aggressively, and most of its listings
- *   redirect to a real ATS anyway. The happy path is: find the job here, follow
- *   the redirect, apply on Greenhouse or Lever with a proper adapter. Indeed's
- *   own smartapply flow is supported but ships disabled and capped.
- * - Naukri is the opposite: permissive, but its apply flow is often a single
- *   button plus a chatbot that asks follow-up questions in a drawer. The
- *   adapter recognises both.
+ * Indeed used to live here too, as a discovery-only stub. It has its own
+ * adapter now -- see `./indeed` -- because it is the agent's primary surface
+ * and needs a real model of its multi-step Easy Apply wizard.
  */
 
 import type { SiteAdapter } from './types'
 import { COMMON_ERROR_SELECTORS, COMMON_SUCCESS_PATTERNS, textOf } from './types'
 import type { CanonicalKey } from '@/form/canonical'
 import type { FieldDescriptor } from '@/storage/schemas'
-
-export const indeedAdapter: SiteAdapter = {
-  id: 'indeed',
-  label: 'Indeed',
-
-  matches(url: string): boolean {
-    return /indeed\.com$/.test(new URL(url, location.href).hostname)
-  },
-
-  detect(doc: Document, url: string) {
-    const onSmartApply = /smartapply\.indeed\.com|\/apply\b/.test(url)
-    const hasForm = Boolean(doc.querySelector('form, [data-testid*="input"]'))
-    const title = textOf(doc.querySelector('[data-testid="jobsearch-JobInfoHeader-title"], h1')) || doc.title
-    const company = textOf(doc.querySelector('[data-testid="inlineHeader-companyName"], [data-company-name]'))
-
-    return {
-      isApplicationForm: onSmartApply && hasForm,
-      confidence: onSmartApply ? 0.7 : 0.15,
-      jobTitle: title,
-      company,
-      multiStep: true,
-      detail: onSmartApply ? 'indeed smartapply' : 'indeed listing page',
-    }
-  },
-
-  canonicalKey(field: FieldDescriptor): CanonicalKey | null {
-    const handle = `${field.id} ${field.name}`.toLowerCase()
-    if (/first.?name/.test(handle)) return 'firstName'
-    if (/last.?name/.test(handle)) return 'lastName'
-    if (/email/.test(handle)) return 'email'
-    if (/phone/.test(handle)) return 'phone'
-    if (/resume/.test(handle)) return 'resume'
-    return null
-  },
-
-  applyEntrySelectors: [
-    '#indeedApplyButton',
-    '[data-testid="indeedApplyButton"]',
-    'button[aria-label*="Apply" i]',
-  ],
-
-  nextStepSelectors: [
-    'button[data-testid="continue-button"]',
-    'button[type="submit"]:not([data-testid*="submit"])',
-  ],
-
-  submitSelectors: ['button[data-testid="submit-application"]', 'button[type="submit"]'],
-
-  successPatterns: [...COMMON_SUCCESS_PATTERNS, /your application has been submitted/i],
-
-  errorSelectors: COMMON_ERROR_SELECTORS,
-}
 
 export const naukriAdapter: SiteAdapter = {
   id: 'naukri',

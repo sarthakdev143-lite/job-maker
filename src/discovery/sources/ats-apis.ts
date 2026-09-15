@@ -73,6 +73,7 @@ export function makeJob(input: {
     discoveredAt: Date.now(),
     scoredAt: null,
     recipeId: input.recipeId,
+    easyApply: false,
   }
 }
 

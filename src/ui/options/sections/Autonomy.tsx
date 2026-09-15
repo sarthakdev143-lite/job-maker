@@ -119,9 +119,15 @@ export default function AutonomySection({
       </Section>
 
       <Section title="Volume" description="Caps are absolute and counted per day, whatever the thresholds say.">
+        <Toggle
+          checked={a.volumeMode}
+          onChange={(v) => set({ volumeMode: v })}
+          label="Volume mode: apply to everything that matches your searches"
+          description="Skips the model's per-job scoring and applies to whatever your search rules already let through. The model is a single chat session, so scoring every posting is the slowest thing the agent does - turning it off is roughly the difference between dozens of applications a night and hundreds. Your title, location and blocklist rules still apply."
+        />
         <div className="grid grid-cols-2 gap-3">
           <Field label="Applications per day" hint="Across every site.">
-            <NumberInput value={a.maxApplicationsPerDay} onChange={(v) => set({ maxApplicationsPerDay: v })} min={1} max={200} />
+            <NumberInput value={a.maxApplicationsPerDay} onChange={(v) => set({ maxApplicationsPerDay: v })} min={1} max={1000} />
           </Field>
           <Field label="Stop after consecutive failures">
             <NumberInput value={a.circuitBreakerFailures} onChange={(v) => set({ circuitBreakerFailures: v })} min={1} max={20} />

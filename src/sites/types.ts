@@ -35,6 +35,19 @@ export interface SiteAdapter {
   canonicalKey?(field: FieldDescriptor, doc?: Document): CanonicalKey | null
   /** Buttons that submit the whole application, most specific first. */
   submitSelectors: string[]
+  /**
+   * Veto on clicking submit at all, for wizards that reuse one control.
+   *
+   * Indeed's Easy Apply flow drives every step with the same button, relabelled
+   * -- so "the submit button is present" is true on the contact-details page as
+   * much as on the final review, and a selector list cannot tell them apart.
+   * When this returns false the runner treats the page as having no submit
+   * control rather than clicking whatever matched.
+   *
+   * Optional: an adapter that omits it can always submit, which is the right
+   * default for the single-page forms most ATSes use.
+   */
+  canSubmit?(doc: Document, url: string): boolean
   /** Buttons that advance a multi-step form without submitting. */
   nextStepSelectors?: string[]
   /** Elements whose presence proves the submission landed. */

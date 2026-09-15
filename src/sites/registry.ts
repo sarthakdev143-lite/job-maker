@@ -12,7 +12,8 @@ import { ashbyAdapter } from './ashby'
 import { workableAdapter } from './workable'
 import { smartRecruitersAdapter } from './smartrecruiters'
 import { workdayAdapter } from './workday'
-import { indeedAdapter, naukriAdapter } from './boards'
+import { indeedAdapter } from './indeed'
+import { naukriAdapter } from './boards'
 import { genericAdapter } from './generic'
 
 export const ADAPTERS: SiteAdapter[] = [

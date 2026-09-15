@@ -11,7 +11,7 @@
  * instead of leaving a half-filled form open.
  */
 
-import { runDiscovery, unscoredJobs } from '@/discovery'
+import { byCheapestFirst, runDiscovery, unscoredJobs } from '@/discovery'
 import { getRecipes } from '@/storage/settings'
 import { scoreJob } from '@/matching/scorer'
 import { applyToJob } from '@/runner/apply-machine'
@@ -20,12 +20,23 @@ import { applicationsRepo, jobsRepo, logsRepo } from '@/storage/db'
 import { getCounter, getProfile, getSettings, profileIsUsable, pruneCounters } from '@/storage/settings'
 import { llm } from '@/llm/broker'
 import { createLogger } from '@/shared/logger'
-import { dayKey, errorMessage, pause } from '@/shared/util'
+import { dayKey, errorMessage, jitter } from '@/shared/util'
+import { durableSleep, startHeartbeat, type Heartbeat } from '@/shared/keepalive'
+import { beat, clearRunState, loadRunState, looksInterrupted, saveRunState } from './run-state'
 import type { AgentState } from '@/shared/messages'
 import { activity, idleStep } from '@/shared/activity'
 import type { Autonomy, Job, Settings } from '@/storage/schemas'
 
 const log = createLogger('agent')
+
+/**
+ * How long to wait between sweeps when the agent is running continuously.
+ *
+ * Short, because most sweeps that find nothing are cheap, and a paused run
+ * (capped out, or outside active hours) needs to notice promptly when the
+ * reason it paused has passed.
+ */
+const IDLE_CYCLE_GAP_MS = 60_000
 
 type StateListener = (state: AgentState) => void
 
@@ -78,6 +89,14 @@ class Orchestrator {
   private cycleInFlight: Promise<void> | null = null
   private listeners = new Set<StateListener>()
   private consecutiveFailures = 0
+  /**
+   * Keeps the service worker resident for as long as the agent is working.
+   *
+   * Without it Chrome evicts the worker after ~30 idle seconds and the run
+   * simply stops mid-flight, leaving a minimized window open and nothing in the
+   * log to say why.
+   */
+  private heartbeat: Heartbeat | null = null
 
   constructor() {
     // Every change to what the agent is doing -- including the fine-grained
@@ -256,11 +275,14 @@ class Orchestrator {
     this.stopRequested = false
     this.manualRun = true
     this.consecutiveFailures = 0
-    this.patch({ running: true, phase: 'idle', lastError: '', startedAt: Date.now() })
+    const startedAt = Date.now()
+    this.patch({ running: true, phase: 'idle', lastError: '', startedAt })
+    await saveRunState({ running: true, startedAt, manual: true })
+    this.beginHeartbeat()
     activity.begin('discovering', 'Starting up', 30_000)
     log.info(`Agent started in ${settings.autonomy.mode} mode`)
 
-    void this.runCycle()
+    void this.runForever()
     return this.getState()
   }
 
@@ -270,6 +292,8 @@ class Orchestrator {
     activity.begin('stopped', 'Stopping after the current step')
     log.info('Stop requested')
     await this.cycleInFlight?.catch(() => {})
+    this.endHeartbeat()
+    await clearRunState()
     this.patch({ running: false, phase: 'idle', currentJobId: '' })
     activity.end('Stopped')
     return this.getState()
@@ -278,18 +302,112 @@ class Orchestrator {
   /** Immediate halt: stop the loop and close any worker windows we opened. */
   async killSwitch(): Promise<AgentState> {
     this.stopRequested = true
+    this.endHeartbeat()
+    await clearRunState()
     this.patch({ running: false, phase: 'stopped', currentJobId: '' })
     activity.end('Halted by the kill switch')
     log.warn('Kill switch engaged')
+    await this.reapOrphanWindows()
+    return this.getState()
+  }
+
+  /**
+   * Close the background windows the agent works in.
+   *
+   * Every worker window is opened minimized with a single tab, and the apply
+   * machine closes its own in a `finally`. That `finally` does not run when the
+   * service worker is evicted mid-application, so an interrupted run leaves a
+   * minimized window behind -- invisible to the user, and one more every time.
+   * Sweeping on wake keeps an overnight run from accumulating dozens of them.
+   */
+  private async reapOrphanWindows(): Promise<number> {
     const windows = await chrome.windows.getAll({ populate: true }).catch(() => [])
+    let closed = 0
     for (const win of windows) {
       const onlyTab = win.tabs?.length === 1 ? win.tabs[0] : null
       // Only close the single-tab minimized windows the agent creates itself.
       if (win.state === 'minimized' && onlyTab && win.id !== undefined) {
         await chrome.windows.remove(win.id).catch(() => {})
+        closed++
       }
     }
-    return this.getState()
+    return closed
+  }
+
+  /* ------------------------------------------------------------- keepalive */
+
+  private beginHeartbeat(): void {
+    this.heartbeat?.stop()
+    // `beat` writes to chrome.storage, which doubles as the extension API call
+    // that resets Chrome's idle timer -- so one interval both keeps the worker
+    // resident and records that the run is still alive.
+    this.heartbeat = startHeartbeat({ ticker: beat })
+  }
+
+  private endHeartbeat(): void {
+    this.heartbeat?.stop()
+    this.heartbeat = null
+  }
+
+  /**
+   * Pick a run back up after the worker was replaced.
+   *
+   * Called on every service worker wake. A run that was in progress resumes
+   * immediately rather than waiting for the next periodic alarm, which is the
+   * difference between losing a minute of an overnight run and losing half an
+   * hour of it.
+   */
+  async resumeIfInterrupted(): Promise<boolean> {
+    if (this.state.running) return false
+
+    const persisted = await loadRunState()
+    if (!persisted.running) return false
+
+    const settings = await getSettings()
+    if (!settings.autonomy.enabled) {
+      // The user switched autonomy off while the worker was away. Honour that
+      // rather than resurrecting a run they have already called off.
+      await clearRunState()
+      return false
+    }
+
+    const gap = Date.now() - persisted.lastBeatAt
+    log.warn(
+      looksInterrupted(persisted)
+        ? `Resuming a run interrupted ${Math.round(gap / 60_000)} minute(s) ago`
+        : 'Resuming after the service worker restarted'
+    )
+
+    const reaped = await this.reapOrphanWindows()
+    if (reaped > 0) log.info(`Closed ${reaped} window(s) left behind by the interrupted run`)
+
+    this.stopRequested = false
+    this.manualRun = persisted.manual
+    this.consecutiveFailures = 0
+    this.patch({ running: true, phase: 'idle', lastError: '', startedAt: persisted.startedAt ?? Date.now() })
+    await saveRunState({ running: true, startedAt: persisted.startedAt, manual: persisted.manual })
+    this.beginHeartbeat()
+
+    void this.runForever()
+    return true
+  }
+
+  /**
+   * Sweep after sweep, until stopped.
+   *
+   * `start` used to kick off exactly one cycle and then go quiet, leaning on a
+   * 30-minute alarm for everything after it. For a run meant to work through
+   * the night that is mostly downtime, so the loop now continues on its own and
+   * the alarm is only a safety net. A short gap between sweeps also means a
+   * cycle that paused -- outside active hours, or at the daily cap -- starts
+   * working again on its own the moment that reason expires.
+   */
+  private async runForever(): Promise<void> {
+    while (!this.stopRequested && this.state.running) {
+      await this.runCycle()
+      if (this.stopRequested || !this.state.running) break
+      await durableSleep(IDLE_CYCLE_GAP_MS, { shouldStop: this.shouldStop })
+    }
   }
 
   /* ----------------------------------------------------------------- cycle */
@@ -355,21 +473,43 @@ class Orchestrator {
         this.patch({ phase: 'scoring' })
         activity.begin('scoring', `Scoring ${toScore.length} posting(s)`, 15_000)
         const profile = await getProfile()
-        const threshold = settings.autonomy.minMatchScore
+        const volumeMode = settings.autonomy.volumeMode
+        const threshold = volumeMode ? 0 : settings.autonomy.minMatchScore
         let index = 0
 
         for (const job of toScore) {
           if (this.shouldStop()) return
           index++
           this.patch({ phase: 'scoring', currentJobId: job.id })
-          activity.begin('scoring', `Scoring ${index} of ${toScore.length}: ${job.title}`, 15_000)
+          activity.begin(
+            'scoring',
+            volumeMode
+              ? `Queueing ${index} of ${toScore.length}: ${job.title}`
+              : `Scoring ${index} of ${toScore.length}: ${job.title}`,
+            15_000
+          )
 
           let score
-          try {
-            score = await scoreJob(job, profile, settings)
-          } catch (e) {
-            log.warn(`Could not score ${job.title} at ${job.company}: ${errorMessage(e)}`, undefined, job.id)
-            continue // left as 'new', so the next cycle retries it
+          if (volumeMode) {
+            // The prefilter has already enforced the user's title, location,
+            // work-mode and blocklist rules, and this job passed them. Asking
+            // the model to second-guess that costs a serialised round-trip and
+            // can only ever subtract from a list the user asked to apply to in
+            // full, so it is skipped outright rather than run and ignored.
+            score = {
+              score: 100,
+              shouldApply: true,
+              reasons: ['volume mode: matched the search rules'],
+              concerns: [],
+              seniority: 'unknown' as const,
+            }
+          } else {
+            try {
+              score = await scoreJob(job, profile, settings)
+            } catch (e) {
+              log.warn(`Could not score ${job.title} at ${job.company}: ${errorMessage(e)}`, undefined, job.id)
+              continue // left as 'new', so the next cycle retries it
+            }
           }
 
           tally.scored++
@@ -487,13 +627,21 @@ class Orchestrator {
 
     await this.refreshCounts()
     if (this.shouldStop()) return false
-    await pause(settings.autonomy.delayBetweenApplicationsMs)
+
+    // Chunked rather than one long sleep: a plain setTimeout of up to three
+    // minutes is exactly the idle stretch Chrome evicts the worker during, and
+    // the run would never wake from it.
+    const gap = jitter(
+      settings.autonomy.delayBetweenApplicationsMs.min,
+      settings.autonomy.delayBetweenApplicationsMs.max
+    )
+    await durableSleep(gap, { shouldStop: this.shouldStop })
     return true
   }
 
   private async applyQueue(): Promise<void> {
     const settings = await getSettings()
-    const queued = await jobsRepo.byStatus('queued', 100)
+    const queued = (await jobsRepo.byStatus('queued', 100)).sort(byCheapestFirst)
     if (queued.length === 0) return
 
     this.patch({ phase: 'applying' })

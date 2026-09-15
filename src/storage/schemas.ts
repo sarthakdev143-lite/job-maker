@@ -203,6 +203,22 @@ export const AutonomySchema = z.object({
    * credentials are never guessed at, whatever this says.
    */
   answerEverything: z.boolean().default(true),
+  /**
+   * Trade per-application polish for throughput.
+   *
+   * The model driver is a single serialised chat session, so every call is on
+   * the critical path of the whole run. At the default settings one job costs
+   * up to four of them -- score it, answer its fields, tailor a resume, write a
+   * cover letter -- which is two to four minutes of pure model time before a
+   * page has even loaded, and caps an overnight run at a couple of dozen
+   * applications.
+   *
+   * With this on, the deterministic prefilter decides what to apply to and the
+   * model is used only for questions that genuinely need it. That is the right
+   * trade when the user's instruction is "apply to everything that matches":
+   * scoring only ever removes jobs they already said they wanted.
+   */
+  volumeMode: z.boolean().default(false),
   maxApplicationsPerDay: z.number().default(15),
   perSiteDailyCap: z.record(z.string(), z.number()).default({
     greenhouse: 20,
@@ -352,6 +368,12 @@ export const JobSchema = z.object({
   discoveredAt: z.number(),
   scoredAt: z.number().nullable().default(null),
   recipeId: z.string().default(''),
+  /**
+   * The posting is Indeed Easy Apply: the form is hosted by Indeed and
+   * prefilled from the user's account, so it costs seconds rather than a full
+   * form-filling pass. The runner works through these first.
+   */
+  easyApply: z.boolean().default(false),
 })
 
 export type Job = z.infer<typeof JobSchema>

@@ -22,6 +22,7 @@ import { BOARD_CATALOGUE, matchCatalogue, validateBoards, type BoardSource, type
 import { createLogger } from '@/shared/logger'
 import { activity } from '@/shared/activity'
 import { uid } from '@/shared/util'
+import { DEFAULT_ROLE_PHRASES } from './sources/indeed'
 import type { SearchRecipe } from '@/storage/schemas'
 
 const log = createLogger('setup')
@@ -67,6 +68,31 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
   const created: string[] = []
   const notes: string[] = []
 
+  // --- Indeed first --------------------------------------------------------
+  //
+  // Indeed needs no verified board slug, so it is the one source that is always
+  // available, and it is where the volume is. It is built before the board
+  // checks below so that a run is viable even when every board lookup fails.
+  const rolePhrases = dedupePhrases([...keywords, ...DEFAULT_ROLE_PHRASES]).slice(0, 8)
+  const previousIndeed = existing.find((r) => r.source === 'indeed' && r.name.startsWith('Indeed remote'))
+  const indeedRecipe: SearchRecipe = {
+    id: previousIndeed?.id ?? uid('recipe'),
+    name: 'Indeed remote roles',
+    enabled: true,
+    source: 'indeed',
+    keywords: rolePhrases,
+    // Left blank deliberately: the URL builder pins every search to Remote, and
+    // a city here would narrow that back down to a single metro.
+    location: '',
+    remoteOnly: true,
+    boards: [],
+    customUrls: [],
+    maxResultsPerRun: 120,
+    lastRunAt: null,
+  }
+  await saveRecipe(indeedRecipe)
+  created.push(`Indeed remote search across ${rolePhrases.length} role(s): ${rolePhrases.slice(0, 4).join(', ')}…`)
+
   const bySource = (source: BoardSource): string[] =>
     live
       .filter((c) => c.source === source)
@@ -102,7 +128,8 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
     created.push(`${boards.length} ${source} board(s): ${boards.slice(0, 6).join(', ')}${boards.length > 6 ? '…' : ''}`)
   }
 
-  const hasApplyableBoards = created.length > 0
+  // Indeed alone already counts as somewhere to apply.
+  const hasApplyableBoards = created.length > 1
 
   // Naukri is worth searching for visibility, but the agent cannot submit
   // there, so it is only added when there is nothing better -- otherwise it
@@ -133,8 +160,9 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
 
   if (!hasApplyableBoards) {
     notes.push(
-      `None of the ${checks.length} candidate boards responded. Add a company by hand in Searches - the slug is ` +
-        'the last part of their careers URL, for example boards.greenhouse.io/<slug>.'
+      `None of the ${checks.length} candidate boards responded, so this is an Indeed-only setup. That is enough ` +
+        'to run; adding a company by hand in Searches just widens it - the slug is the last part of their ' +
+        'careers URL, for example boards.greenhouse.io/<slug>.'
     )
   }
 
@@ -145,11 +173,26 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
 
   return {
     created,
-    needsManual: created.length === 0,
+    // Indeed is always created, so manual setup is never strictly required.
+    needsManual: false,
     boardsChecked: checks.length,
     boardsLive: live.length,
     notes,
   }
+}
+
+/** Case-insensitive phrase dedupe, preserving the order they were offered in. */
+function dedupePhrases(phrases: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const phrase of phrases) {
+    const trimmed = phrase.trim()
+    const key = trimmed.toLowerCase()
+    if (!trimmed || seen.has(key)) continue
+    seen.add(key)
+    out.push(trimmed)
+  }
+  return out
 }
 
 function dedupe(entries: CatalogueEntry[]): CatalogueEntry[] {

@@ -1,8 +1,10 @@
 /**
- * Indeed and Naukri discovery, by driving a tab.
+ * Naukri discovery, by driving a tab.
  *
- * Neither publishes a usable public JSON board, so these open a search URL in a
- * background tab, scroll it the way a person would, and read the listing cards.
+ * Naukri publishes no usable public JSON board, so this opens a search URL in a
+ * background tab, scrolls it the way a person would, and reads the listing
+ * cards. Indeed used to share this file; it is the primary source now and has
+ * its own module, `./indeed`, with remote filtering and Easy Apply detection.
  *
  * The scrape functions below are injected with chrome.scripting.executeScript,
  * which serialises them to source text -- so they must be entirely
@@ -72,77 +74,6 @@ async function humanScroll(tabId: number, passes = 4): Promise<void> {
       .catch(() => {})
     await pause({ min: 700, max: 1600 })
   }
-}
-
-/* ---------------------------------------------------------------- indeed */
-
-function scrapeIndeedCards(): ScrapedCard[] {
-  const text = (el: Element | null | undefined): string =>
-    ((el as HTMLElement | null)?.innerText ?? '').replace(/\s+/g, ' ').trim()
-
-  const cards = Array.from(document.querySelectorAll('div.job_seen_beacon, [data-testid="slider_item"]'))
-  const out: ScrapedCard[] = []
-
-  for (const card of cards) {
-    const link = card.querySelector('a[data-jk], h2 a, a.jcs-JobTitle') as HTMLAnchorElement | null
-    const title = text(card.querySelector('h2 span[title], h2 a span, [id^="jobTitle"]')) || text(link)
-    if (!title) continue
-    out.push({
-      title,
-      company: text(card.querySelector('[data-testid="company-name"], .companyName, span.css-1h7lukg')),
-      location: text(card.querySelector('[data-testid="text-location"], .companyLocation')),
-      url: link?.href ?? '',
-      postedText: text(card.querySelector('[data-testid="myJobsStateDate"], .date, span.css-qvloho')),
-      salaryText: text(card.querySelector('[data-testid="attribute_snippet_testid"], .salary-snippet-container')),
-      snippet: text(card.querySelector('[data-testid="jobsnippet_footer"], .job-snippet')),
-    })
-  }
-  return out
-}
-
-export async function fetchIndeed(recipe: SearchRecipe): Promise<Job[]> {
-  const urls = recipe.customUrls.length > 0 ? recipe.customUrls : buildIndeedUrls(recipe)
-  const jobs: Job[] = []
-
-  for (const url of urls) {
-    activity.note(`opening ${new URL(url).hostname}`)
-    const { tabId, windowId } = await openWorkerTab(url)
-    try {
-      await waitForLoad(tabId)
-      await humanScroll(tabId)
-      const cards = (await runInTab(tabId, scrapeIndeedCards)) ?? []
-      activity.note(`read ${cards.length} listing(s) from Indeed`)
-      log.info(`Indeed: ${cards.length} card(s) from ${url}`)
-      for (const card of cards.slice(0, recipe.maxResultsPerRun)) {
-        if (!card.url) continue
-        jobs.push(
-          makeJob({
-            source: 'indeed',
-            vendor: 'indeed',
-            url: card.url,
-            company: card.company,
-            title: card.title,
-            location: card.location,
-            descriptionText: card.snippet,
-            postedAt: null, // relative text; parsed by the caller via parsePostedDate
-            salaryText: card.salaryText,
-            recipeId: recipe.id,
-          })
-        )
-      }
-    } finally {
-      await closeWindow(windowId)
-    }
-    await pause({ min: 4000, max: 9000 })
-  }
-  return jobs
-}
-
-export function buildIndeedUrls(recipe: SearchRecipe): string[] {
-  const q = encodeURIComponent(recipe.keywords.join(' ') || 'software engineer')
-  const l = encodeURIComponent(recipe.location || '')
-  const base = `https://www.indeed.com/jobs?q=${q}&l=${l}&sort=date`
-  return [base, `${base}&start=10`]
 }
 
 /* ---------------------------------------------------------------- naukri */

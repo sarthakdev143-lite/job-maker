@@ -38,7 +38,14 @@ import { activity } from '@/shared/activity'
 
 const log = createLogger('runner')
 
-const MAX_WIZARD_STEPS = 8
+/**
+ * Indeed's Easy Apply splits itself finely -- contact, resume, several pages of
+ * screening questions, then review -- and eight steps was not enough to reach
+ * the submit button on a posting with a long questionnaire. The loop still
+ * stops early whenever a step fails to change, so a higher ceiling costs
+ * nothing on shorter forms.
+ */
+const MAX_WIZARD_STEPS = 14
 const TAB_LOAD_TIMEOUT_MS = 45000
 const AGENT_READY_TIMEOUT_MS = 25000
 
@@ -69,14 +76,67 @@ export type ApplyOutcome = {
  * explicitly is the difference between "no application form found" and a
  * working submission on a large share of real postings.
  */
-type WorkerTab = { tabId: number; windowId: number; frameId?: number }
+type WorkerTab = {
+  tabId: number
+  windowId: number
+  frameId?: number
+  /**
+   * Windows opened by the page itself that we have taken over.
+   *
+   * Indeed's apply button frequently opens its form in a new tab rather than
+   * navigating, and the same is true of several ATSes embedded behind a job
+   * advert. Those windows are ours to close even though we did not create them:
+   * left behind, an overnight run accumulates one per application.
+   */
+  extraWindowIds?: number[]
+}
 
 async function openTab(url: string): Promise<WorkerTab> {
   return openWorkerWindow(url, { minimized: true })
 }
 
 async function closeTab(tab: WorkerTab | null): Promise<void> {
+  for (const windowId of tab?.extraWindowIds ?? []) {
+    await closeWorkerWindow(windowId)
+  }
   await closeWorkerWindow(tab?.windowId)
+}
+
+/** Every tab id currently open, so a new one can be spotted by difference. */
+async function openTabIds(): Promise<Set<number>> {
+  const tabs = await chrome.tabs.query({}).catch(() => [])
+  return new Set(tabs.map((t) => t.id).filter((id): id is number => typeof id === 'number'))
+}
+
+/**
+ * Take over a tab the page opened for us.
+ *
+ * Clicking "Apply" is as likely to open a new tab as to navigate, and the
+ * runner used to re-detect in the original one -- still showing the advert --
+ * conclude there was no form, and skip a perfectly good application. Polling
+ * briefly for a tab that did not exist before the click, and continuing in it,
+ * is what makes Indeed's Easy Apply reachable at all.
+ */
+async function adoptNewTab(before: Set<number>, tab: WorkerTab, timeoutMs = 8000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const tabs = await chrome.tabs.query({}).catch(() => [])
+    const fresh = tabs.find((t) => typeof t.id === 'number' && !before.has(t.id))
+    if (fresh?.id !== undefined) {
+      // Keep the original around rather than closing it: the finally block
+      // closes both, and closing it here would race the navigation.
+      tab.extraWindowIds = [...(tab.extraWindowIds ?? []), tab.windowId]
+      tab.tabId = fresh.id
+      if (fresh.windowId !== undefined) tab.windowId = fresh.windowId
+      tab.frameId = undefined
+      // A tab the browser just opened is usually focused and visible; push it
+      // out of the way so an overnight run does not steal the screen.
+      await chrome.windows.update(tab.windowId, { state: 'minimized' }).catch(() => {})
+      return true
+    }
+    await sleep(400)
+  }
+  return false
 }
 
 async function waitForLoad(tabId: number): Promise<void> {
@@ -227,9 +287,14 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
 
     if (!detect.isApplicationForm) {
       step('enter form')
+      const tabsBefore = await openTabIds()
       const clicked = await clickApplyEntry(tab.tabId, adapter.applyEntrySelectors ?? [])
       if (clicked) {
         await sleep(2500)
+        const movedTab = await adoptNewTab(tabsBefore, tab, 8000)
+        if (movedTab) step('follow', 'the application opened in a new tab')
+        // Whether it navigated or opened elsewhere, the form is still arriving.
+        await waitForLoad(tab.tabId).catch(() => {})
         await ensureAgent(tab.tabId)
         // The form may have appeared in a frame that did not exist before.
         tab.frameId = await pickFormFrame(tab.tabId)

@@ -352,7 +352,9 @@ async function registerCustomDomains(domains: string[]): Promise<void> {
 
 chrome.runtime.onInstalled.addListener(async (details) => {
   log.info(`Extension ${details.reason}`)
-  await chrome.alarms.create(CYCLE_ALARM, { periodInMinutes: 30 })
+  // One minute, not thirty. The alarm is the safety net under an evicted
+  // worker, so its period is the worst-case dead time in an unattended run.
+  await chrome.alarms.create(CYCLE_ALARM, { periodInMinutes: 1 })
   await chrome.alarms.create(MAINTENANCE_ALARM, { periodInMinutes: 720 })
 
   const settings = await getSettings()
@@ -367,12 +369,19 @@ chrome.runtime.onStartup.addListener(async () => {
   const settings = await getSettings()
   await registerCustomDomains(settings.customApplyDomains)
   await orchestrator.refreshCounts()
+  await orchestrator.resumeIfInterrupted()
 })
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === CYCLE_ALARM) {
     const settings = await getSettings()
     if (!settings.autonomy.enabled) return
+
+    // A run the worker was evicted out of takes priority: it already has a
+    // queue and a heartbeat to restore, and starting a fresh one on top of it
+    // would run two loops against the same jobs.
+    if (await orchestrator.resumeIfInterrupted()) return
+
     if (!orchestrator.getState().running) {
       log.info('Scheduled cycle starting')
       await orchestrator.start().catch((e) => log.warn(`Scheduled start refused: ${errorMessage(e)}`))
@@ -390,5 +399,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // Clicking the toolbar icon opens the console rather than a popup-only view.
 chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {})
+
+/**
+ * Resume on wake, not just on browser start.
+ *
+ * Chrome replaces an evicted worker by running this file again, with no event
+ * to say why. Checking the persisted run state at module scope is what turns
+ * eviction into a pause of seconds rather than a silent stop.
+ */
+void orchestrator.resumeIfInterrupted().catch((e) => log.warn(`Could not resume: ${errorMessage(e)}`))
 
 log.info('Service worker ready')

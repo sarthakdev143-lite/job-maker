@@ -28,6 +28,11 @@ const HIGHLIGHT_STYLE_ID = 'autoapply-highlight-style'
 
 function clickableSubmit(): { el: HTMLElement; selector: string } | null {
   const adapter = adapterForUrl(location.href)
+
+  // A wizard that drives every step with one relabelled button can only be
+  // told apart by the page it is on, which no selector can express.
+  if (adapter.canSubmit && !adapter.canSubmit(document, location.href)) return null
+
   for (const sel of adapter.submitSelectors) {
     try {
       const el = document.querySelector<HTMLElement>(sel)

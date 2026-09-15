@@ -11,7 +11,8 @@
  */
 
 import { fetchAshby, fetchGreenhouse, fetchLever, filterByKeywords } from './sources/ats-apis'
-import { fetchIndeed, fetchNaukri, hydrateDescriptions } from './sources/scraped-boards'
+import { fetchNaukri, hydrateDescriptions } from './sources/scraped-boards'
+import { fetchIndeed, hydrateIndeedJobs } from './sources/indeed'
 import { enrichJob, prefilter } from '@/matching/prefilter'
 import { jobsRepo } from '@/storage/db'
 import { getRecipes, getSettings, saveRecipe } from '@/storage/settings'
@@ -88,7 +89,12 @@ export async function runDiscovery(
       // Only hydrate what could plausibly survive; fetching descriptions is the
       // slow part and there is no point paying it for a blocklisted company.
       const plausible = jobs.filter((j) => prefilter(j, settings.matchRules).pass || j.descriptionText.length < 400)
-      if (recipe.source === 'indeed' || recipe.source === 'naukri' || recipe.source === 'custom') {
+      if (recipe.source === 'indeed' || recipe.source === 'custom') {
+        // The Indeed hydrator also resolves each listing's real apply target,
+        // which is what lets the runner open a company ATS form directly
+        // instead of landing on an advert and giving up.
+        await hydrateIndeedJobs(plausible, Math.min(40, recipe.maxResultsPerRun))
+      } else if (recipe.source === 'naukri') {
         await hydrateDescriptions(plausible, Math.min(12, recipe.maxResultsPerRun))
       }
 
@@ -125,8 +131,22 @@ export async function runDiscovery(
   return result
 }
 
-/** Jobs that are ready to be scored, oldest first so nothing starves. */
+/**
+ * Jobs ready to be worked on, cheapest first.
+ *
+ * Indeed Easy Apply postings come first because they are prefilled from the
+ * user's Indeed account and finish in seconds, where a listing that redirects
+ * to a company ATS costs a full form-filling pass and often a model call. Over
+ * a night that ordering is the difference between clearing the easy hundred and
+ * getting stuck on the first twenty hard ones. Within each group the oldest
+ * goes first, so nothing starves.
+ */
 export async function unscoredJobs(limit = 25): Promise<Job[]> {
   const jobs = await jobsRepo.byStatus('new', 500)
-  return jobs.sort((a, b) => a.discoveredAt - b.discoveredAt).slice(0, limit)
+  return jobs.sort(byCheapestFirst).slice(0, limit)
+}
+
+export function byCheapestFirst(a: Job, b: Job): number {
+  if (a.easyApply !== b.easyApply) return a.easyApply ? -1 : 1
+  return a.discoveredAt - b.discoveredAt
 }
