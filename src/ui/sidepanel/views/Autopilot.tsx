@@ -13,7 +13,14 @@
 import { useState } from 'react'
 import { api, useAction, type AutopilotResult } from '../../shared/api'
 
-export default function Autopilot({ onDone }: { onDone: () => void }) {
+export default function Autopilot({
+  onDone,
+  configured = false,
+}: {
+  onDone: () => void
+  /** The agent has sent before, so this is a re-run rather than first setup. */
+  configured?: boolean
+}) {
   const { run, busy, error } = useAction()
   const [result, setResult] = useState<AutopilotResult | null>(null)
 
@@ -56,10 +63,11 @@ export default function Autopilot({ onDone }: { onDone: () => void }) {
 
   return (
     <div className="mb-3 surface px-3 py-3" style={{ borderColor: 'var(--accent)' }}>
-      <p className="text-[13px] font-semibold">Apply for me</p>
+      <p className="text-[13px] font-semibold">{configured ? 'Set up and start again' : 'Apply for me'}</p>
       <p className="mt-0.5 text-[11.5px]" style={{ color: 'var(--ink-soft)' }}>
-        Verifies company boards, builds your searches, and runs unattended — submitting real applications without
-        asking each time. Roughly a minute to set up.
+        {configured
+          ? 'Rebuilds your searches and re-applies the unattended settings — volume mode, Indeed, and the daily caps — then starts. Safe to run again; it replaces the previous searches rather than adding to them.'
+          : 'Verifies company boards, builds your searches, and runs unattended — submitting real applications without asking each time. Roughly a minute to set up.'}
       </p>
 
       <button className="btn btn-primary mt-2 w-full" disabled={working} onClick={go}>

@@ -40,9 +40,21 @@ export default function Dashboard({
     <div>
       <NowCard state={state} reachable={reachable} onRecheck={recheck} />
 
-      {/* The shortest path from installed to applying, offered until it is. */}
-      {!running && (stats?.submittedTotal ?? 0) === 0 && (
+      {/*
+        The shortest path from installed to applying.
+        
+        This used to hide itself as soon as one application had ever been sent,
+        on the theory that setup was then done. That was wrong: this card is the
+        only thing that configures volume mode, the Indeed search and the
+        overnight caps, so an agent that had submitted once could never be
+        reconfigured from the panel again -- the button simply vanished, and the
+        header's Start ran with whatever settings happened to be there. It is
+        idempotent (searches are replaced by id, not stacked), so offering it
+        whenever the agent is stopped costs nothing.
+      */}
+      {!running && (
         <Autopilot
+          configured={(stats?.submittedTotal ?? 0) > 0}
           onDone={() => {
             recheck()
             reload()
