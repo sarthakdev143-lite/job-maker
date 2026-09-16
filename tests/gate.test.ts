@@ -169,3 +169,56 @@ describe('withinActiveWindow', () => {
     expect(withinActiveWindow(always, new Date('2026-01-14T04:00:00'))).toBe(true)
   })
 })
+
+/**
+ * Reaching the site's own final screen settles the required-field question.
+ *
+ * Regression: on Indeed's five-step wizard the runner accumulated every field
+ * it could not answer across all steps, and the gate then vetoed the
+ * submission on that pile -- even though the site had validated each page in
+ * turn and walked us all the way to "Review your application". Every
+ * application filled perfectly and then parked, and nothing was ever sent.
+ *
+ * The site is the authority on what it requires. If it let us reach the end,
+ * our own guess about mandatory fields is not a reason to stop.
+ */
+describe('reaching the final step overrides our own required-field guess', () => {
+  const blocked = () =>
+    facts({
+      autonomy: AutonomySchema.parse({ mode: 'full', requireAllRequiredFields: true }),
+      vendor: 'indeed',
+      unresolved: [descriptor({ required: true, label: 'Years with Kubernetes' })],
+    })
+
+  it('parks when the wizard stopped somewhere in the middle', () => {
+    const decision = evaluateGate({ ...blocked(), reachedFinalStep: false })
+    expect(decision.action).toBe('review')
+    expect(decision.reasons.join(' ')).toMatch(/required field/i)
+  })
+
+  it('submits when the site itself walked us to its final screen', () => {
+    const decision = evaluateGate({ ...blocked(), reachedFinalStep: true })
+    expect(decision.action).toBe('submit')
+  })
+
+  it('treats a missing flag as not-final, so the cautious path stays the default', () => {
+    expect(evaluateGate(blocked()).action).toBe('review')
+  })
+
+  it('still refuses a switched-off vendor even on the final screen', () => {
+    // Reaching the end is not a licence to ignore every other veto.
+    const decision = evaluateGate({ ...blocked(), reachedFinalStep: true, vendorEnabled: false })
+    expect(decision.action).toBe('skip')
+  })
+
+  it('still respects the daily cap on the final screen', () => {
+    const base = blocked()
+    const decision = evaluateGate({
+      ...base,
+      reachedFinalStep: true,
+      appliedToday: base.autonomy.maxApplicationsPerDay,
+    })
+    expect(decision.action).toBe('review')
+    expect(decision.reasons.join(' ')).toMatch(/cap/i)
+  })
+})

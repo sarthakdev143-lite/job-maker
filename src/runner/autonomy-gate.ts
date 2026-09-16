@@ -35,6 +35,15 @@ export type GateFacts = {
   unresolved: FieldDescriptor[]
   vendor: string
   vendorEnabled: boolean
+  /**
+   * The wizard reached the site's own final review screen.
+   *
+   * That is the site saying it is satisfied: every page in between validated
+   * and let us through. Second-guessing it here with our own idea of which
+   * fields were mandatory is how an application that the employer would have
+   * accepted ends up parked for ever instead.
+   */
+  reachedFinalStep?: boolean
   appliedToday: number
   appliedTodayOnVendor: number
   now: Date
@@ -79,7 +88,7 @@ export function evaluateGate(facts: GateFacts): GateDecision {
   // unresolved-required-field check still applies -- submitting a form with a
   // blank required question just fails validation anyway.
   const requiredUnresolved = facts.unresolved.filter((f) => f.required)
-  if (autonomy.requireAllRequiredFields && requiredUnresolved.length > 0) {
+  if (autonomy.requireAllRequiredFields && requiredUnresolved.length > 0 && !facts.reachedFinalStep) {
     reasons.push(
       `${requiredUnresolved.length} required field(s) unanswered: ${requiredUnresolved
         .slice(0, 3)

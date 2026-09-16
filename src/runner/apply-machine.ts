@@ -426,24 +426,38 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
         await sleep(900)
       }
 
-      // --- never move on from an unanswered mandatory question -------------
+      // --- stop here if this page is the one that submits -------------------
       //
-      // On a chatbot-style flow the "next" control is often the submit control
-      // too, so advancing past a blank required question does not leave it for
-      // later -- it sends the application without it, and the site rejects the
-      // whole thing as incomplete.
+      // Reaching the final screen is the goal, not something to advance past.
+      // Without this the loop kept pressing on, and on a wizard whose last
+      // control is the submit button that is how an application gets sent by
+      // accident -- or, more often, how the loop exits somewhere in the middle
+      // and calls submit on a page that rightly refuses.
+      if (detect.readyToSubmit) {
+        await applicationsRepo.addTimeline(application.id, 'wizard', `reached the final step: ${detect.detail}`)
+        break
+      }
+
+      // --- an unanswered mandatory question ---------------------------------
+      //
+      // This used to break outright, which on Indeed's five-step wizard meant
+      // bailing out in the middle and then trying to submit from there -- the
+      // adapter refused, correctly, and nothing was ever sent. The site itself
+      // is the better authority: try to advance, and let its own validation
+      // decide. `advanceStep` reports honestly whether the page actually moved,
+      // and `canSubmit` guarantees that pressing continue cannot submit, so
+      // attempting it risks nothing.
       const requiredStillBlank = resolved.unresolved.filter((f) => f.required)
       if (requiredStillBlank.length > 0 && settings.autonomy.requireAllRequiredFields) {
         await applicationsRepo.addTimeline(
           application.id,
           'wizard',
-          `stopped before advancing: ${requiredStillBlank.length} mandatory question(s) unanswered (${requiredStillBlank
+          `${requiredStillBlank.length} mandatory question(s) unanswered (${requiredStillBlank
             .slice(0, 3)
             .map((f) => f.label || f.selector)
-            .join(', ')})`,
+            .join(', ')}); letting the site decide`,
           'warn'
         )
-        break
       }
 
       // --- advance a wizard, or stop ---------------------------------------
@@ -451,12 +465,25 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       const advance = await callAgent<Extract<FormResponse, { type: 'form:advanceStep' }>>(tab, {
         type: 'form:advanceStep',
       })
-      if (!advance.advanced) break
+      if (!advance.advanced) {
+        await applicationsRepo.addTimeline(
+          application.id,
+          'wizard',
+          `stopped: ${advance.detail}`,
+          'warn'
+        )
+        break
+      }
 
       await applicationsRepo.addTimeline(application.id, 'wizard', `advanced: ${advance.detail}`)
       await pause({ min: 1200, max: 2600 })
       await ensureAgent(tab.tabId)
       tab.frameId = await pickFormFrame(tab.tabId)
+
+      // Re-read the page rather than reusing the first step's verdict. The
+      // stale copy is what left the loop blind to arriving at the review
+      // screen, and to the form ending early.
+      detect = (await callAgent<Extract<FormResponse, { type: 'form:detect' }>>(tab, { type: 'form:detect' })).result
       harvest = await harvestStep(tab)
       stepIndex++
     }
@@ -494,6 +521,7 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       unresolved: allUnresolved,
       vendor,
       vendorEnabled: settings.enabledSites[vendor] ?? false,
+      reachedFinalStep: detect.readyToSubmit,
       appliedToday: await getCounter(dailyCounterKey()),
       appliedTodayOnVendor: await getCounter(dailyCounterKey(vendor)),
       now: new Date(),
@@ -716,7 +744,11 @@ async function harvestStep(tab: WorkerTab): Promise<{ fields: FieldDescriptor[];
 async function verifySubmission(tab: WorkerTab): Promise<FormVerifyResult> {
   // Confirmation can be a navigation or an in-place re-render, so poll rather
   // than checking once; a slow redirect otherwise reads as a failed submit.
-  const deadline = Date.now() + 20000
+  // Generous, because this is the one wait that must not be cut short. Indeed
+  // renders its confirmation after a round-trip that can take a while on a
+  // throttled background window, and closing the tab first loses the proof that
+  // the application landed -- which reads, wrongly, as a failed submission.
+  const deadline = Date.now() + 45000
   let last: FormVerifyResult = { submitted: false, signal: 'no_signal', detail: 'not checked' }
 
   while (Date.now() < deadline) {

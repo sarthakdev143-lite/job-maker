@@ -189,6 +189,9 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
 
     case 'form:detect': {
       const result = adapter.detect(document, location.href)
+      // The same guard `clickableSubmit` consults, surfaced so the runner can
+      // stop advancing the moment the final screen is reached.
+      const readyToSubmit = adapter.canSubmit ? adapter.canSubmit(document, location.href) : true
       const needsAccount = adapter.id === 'workday' && workdayNeedsAccount(document)
       return {
         ok: true,
@@ -201,6 +204,7 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
           confidence: needsAccount ? 0 : result.confidence,
           multiStep: result.multiStep,
           detail: needsAccount ? 'Workday requires an account for this employer' : result.detail,
+          readyToSubmit,
         },
       }
     }

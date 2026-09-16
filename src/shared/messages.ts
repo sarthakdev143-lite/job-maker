@@ -108,6 +108,15 @@ export type FormDetectResult = {
   confidence: number
   multiStep: boolean
   detail: string
+  /**
+   * This page is the one that sends the application.
+   *
+   * The runner used to advance blindly and hope it landed on the final screen,
+   * which on a five-step wizard it usually did not: it bailed out somewhere in
+   * the middle, called submit there, and was correctly refused. Asking the page
+   * itself removes the guesswork.
+   */
+  readyToSubmit: boolean
 }
 
 export type FormFillResult = {
