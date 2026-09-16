@@ -22,6 +22,7 @@ import { llm } from '@/llm/broker'
 import { createLogger } from '@/shared/logger'
 import { dayKey, errorMessage, jitter } from '@/shared/util'
 import { durableSleep, startHeartbeat, type Heartbeat } from '@/shared/keepalive'
+import { closeAllWorkerWindows } from '@/shared/windows'
 import { beat, clearRunState, loadRunState, looksInterrupted, saveRunState } from './run-state'
 import type { AgentState } from '@/shared/messages'
 import { activity, idleStep } from '@/shared/activity'
@@ -97,6 +98,17 @@ class Orchestrator {
    * log to say why.
    */
   private heartbeat: Heartbeat | null = null
+  /**
+   * Whether a sweep loop is already running in this worker.
+   *
+   * Set synchronously, before any `await`, because that is the whole point.
+   * `start` and `resumeIfInterrupted` both guarded on `state.running`, which
+   * they only set after awaiting storage and settings -- so the one-minute
+   * alarm and the wake-time resume could both pass the guard in that gap and
+   * each begin their own loop. Two loops meant two applications in flight at
+   * once, each opening windows, and neither finishing cleanly.
+   */
+  private loopActive = false
 
   constructor() {
     // Every change to what the agent is doing -- including the fine-grained
@@ -253,7 +265,8 @@ class Orchestrator {
   /* ----------------------------------------------------------------- start */
 
   async start(): Promise<AgentState> {
-    if (this.state.running) return this.getState()
+    if (this.state.running || this.loopActive) return this.getState()
+    this.loopActive = true
 
     const settings = await getSettings()
     const checks = await this.preflight()
@@ -261,6 +274,7 @@ class Orchestrator {
 
     if (blockers.length > 0) {
       const message = blockers.map((c) => c.detail).join('. ')
+      this.loopActive = false
       this.patch({ phase: 'error', lastError: message })
       log.error(`Cannot start: ${message}`)
       throw new Error(message)
@@ -288,11 +302,14 @@ class Orchestrator {
 
   async stop(): Promise<AgentState> {
     this.stopRequested = true
+    this.loopActive = false
     this.patch({ phase: 'stopped' })
     activity.begin('stopped', 'Stopping after the current step')
     log.info('Stop requested')
     await this.cycleInFlight?.catch(() => {})
     this.endHeartbeat()
+    const closed = await closeAllWorkerWindows()
+    if (closed > 0) log.info(`Closed ${closed} working window(s)`)
     await clearRunState()
     this.patch({ running: false, phase: 'idle', currentJobId: '' })
     activity.end('Stopped')
@@ -302,6 +319,7 @@ class Orchestrator {
   /** Immediate halt: stop the loop and close any worker windows we opened. */
   async killSwitch(): Promise<AgentState> {
     this.stopRequested = true
+    this.loopActive = false
     this.endHeartbeat()
     await clearRunState()
     this.patch({ running: false, phase: 'stopped', currentJobId: '' })
@@ -321,17 +339,11 @@ class Orchestrator {
    * Sweeping on wake keeps an overnight run from accumulating dozens of them.
    */
   private async reapOrphanWindows(): Promise<number> {
-    const windows = await chrome.windows.getAll({ populate: true }).catch(() => [])
-    let closed = 0
-    for (const win of windows) {
-      const onlyTab = win.tabs?.length === 1 ? win.tabs[0] : null
-      // Only close the single-tab minimized windows the agent creates itself.
-      if (win.state === 'minimized' && onlyTab && win.id !== undefined) {
-        await chrome.windows.remove(win.id).catch(() => {})
-        closed++
-      }
-    }
-    return closed
+    // Closes only windows this agent recorded opening. The previous version
+    // closed any minimized single-tab window, which is a fair description of
+    // an agent worker window and also of something the user had minimized and
+    // was still using.
+    return closeAllWorkerWindows()
   }
 
   /* ------------------------------------------------------------- keepalive */
@@ -358,15 +370,21 @@ class Orchestrator {
    * hour of it.
    */
   async resumeIfInterrupted(): Promise<boolean> {
-    if (this.state.running) return false
+    if (this.state.running || this.loopActive) return false
+    // Claimed before the first await, so a concurrent caller cannot slip past.
+    this.loopActive = true
 
     const persisted = await loadRunState()
-    if (!persisted.running) return false
+    if (!persisted.running) {
+      this.loopActive = false
+      return false
+    }
 
     const settings = await getSettings()
     if (!settings.autonomy.enabled) {
       // The user switched autonomy off while the worker was away. Honour that
       // rather than resurrecting a run they have already called off.
+      this.loopActive = false
       await clearRunState()
       return false
     }
@@ -403,10 +421,14 @@ class Orchestrator {
    * working again on its own the moment that reason expires.
    */
   private async runForever(): Promise<void> {
-    while (!this.stopRequested && this.state.running) {
-      await this.runCycle()
-      if (this.stopRequested || !this.state.running) break
-      await durableSleep(IDLE_CYCLE_GAP_MS, { shouldStop: this.shouldStop })
+    try {
+      while (!this.stopRequested && this.state.running) {
+        await this.runCycle()
+        if (this.stopRequested || !this.state.running) break
+        await durableSleep(IDLE_CYCLE_GAP_MS, { shouldStop: this.shouldStop })
+      }
+    } finally {
+      this.loopActive = false
     }
   }
 

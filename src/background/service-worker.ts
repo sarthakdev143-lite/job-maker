@@ -352,9 +352,11 @@ async function registerCustomDomains(domains: string[]): Promise<void> {
 
 chrome.runtime.onInstalled.addListener(async (details) => {
   log.info(`Extension ${details.reason}`)
-  // One minute, not thirty. The alarm is the safety net under an evicted
-  // worker, so its period is the worst-case dead time in an unattended run.
-  await chrome.alarms.create(CYCLE_ALARM, { periodInMinutes: 1 })
+  // Five minutes. One minute was too eager: the loop already runs continuously
+  // on its own, so the alarm is purely the safety net under an evicted worker,
+  // and firing it constantly only added chances to race that loop into
+  // existence twice.
+  await chrome.alarms.create(CYCLE_ALARM, { periodInMinutes: 5 })
   await chrome.alarms.create(MAINTENANCE_ALARM, { periodInMinutes: 720 })
 
   const settings = await getSettings()

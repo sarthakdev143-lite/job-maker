@@ -61,10 +61,86 @@ function unpack(win: chrome.windows.Window | undefined): WorkerWindow {
   if (win?.id === undefined || tabId === undefined) {
     throw new Error('Could not open a background window. Chrome refused the request.')
   }
+  void remember(win.id)
   return { tabId, windowId: win.id }
 }
 
+/**
+ * Windows this agent created, by id.
+ *
+ * Ownership has to be tracked explicitly because the agent is not the only
+ * thing opening windows on this machine. Without it, "close the window we
+ * finished with" and "tidy up anything left behind" both degrade into "close
+ * whatever looks agent-shaped", which is how a run ends up closing the user's
+ * own tabs while they are working.
+ *
+ * Kept in `chrome.storage.session` as well as memory: the service worker can be
+ * evicted mid-run, and a window whose owner has been forgotten is exactly the
+ * window that leaks.
+ */
+const owned = new Set<number>()
+const OWNED_KEY = 'windows:owned'
+
+async function remember(windowId: number): Promise<void> {
+  owned.add(windowId)
+  try {
+    await chrome.storage.session.set({ [OWNED_KEY]: [...owned] })
+  } catch {
+    // Memory-only tracking still covers the common case.
+  }
+}
+
+async function forget(windowId: number): Promise<void> {
+  owned.delete(windowId)
+  try {
+    await chrome.storage.session.set({ [OWNED_KEY]: [...owned] })
+  } catch {
+    // Ignore.
+  }
+}
+
+/** Re-read ownership after a service worker restart. */
+export async function loadOwnedWindows(): Promise<Set<number>> {
+  try {
+    const stored = await chrome.storage.session.get(OWNED_KEY)
+    for (const id of (stored?.[OWNED_KEY] as number[] | undefined) ?? []) owned.add(id)
+  } catch {
+    // Ignore.
+  }
+  return new Set(owned)
+}
+
+export function isOwnedWindow(windowId: number | null | undefined): boolean {
+  return windowId !== null && windowId !== undefined && owned.has(windowId)
+}
+
+/**
+ * Close a window the agent opened.
+ *
+ * Refuses windows it does not own, so a mistaken id cannot take the user's
+ * work with it.
+ */
 export async function closeWorkerWindow(windowId: number | null | undefined): Promise<void> {
   if (windowId === null || windowId === undefined) return
+  if (!owned.has(windowId)) {
+    log.debug(`Refusing to close window ${windowId}: not one of ours`)
+    return
+  }
   await chrome.windows.remove(windowId).catch(() => {})
+  await forget(windowId)
+}
+
+/** Close every window still open from this run. Used on stop and on wake. */
+export async function closeAllWorkerWindows(): Promise<number> {
+  await loadOwnedWindows()
+  let closed = 0
+  for (const windowId of [...owned]) {
+    const existing = await chrome.windows.get(windowId).catch(() => null)
+    if (existing) {
+      await chrome.windows.remove(windowId).catch(() => {})
+      closed++
+    }
+    await forget(windowId)
+  }
+  return closed
 }

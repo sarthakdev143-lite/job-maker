@@ -33,7 +33,7 @@ import type { Application, FieldDescriptor, FilledField, Job, Settings } from '@
 import { createLogger } from '@/shared/logger'
 import { errorMessage, pause, sleep, uid, withTimeout } from '@/shared/util'
 import { ensureContentScript, formAgentFiles } from '@/shared/injection'
-import { closeWorkerWindow, openWorkerWindow } from '@/shared/windows'
+import { closeWorkerWindow, isOwnedWindow, openWorkerWindow } from '@/shared/windows'
 import { activity } from '@/shared/activity'
 
 const log = createLogger('runner')
@@ -102,10 +102,22 @@ async function closeTab(tab: WorkerTab | null): Promise<void> {
   await closeWorkerWindow(tab?.windowId)
 }
 
-/** Every tab id currently open, so a new one can be spotted by difference. */
+/**
+ * Tab ids currently open in windows this agent owns.
+ *
+ * Scoped to our own windows on purpose. The first version queried every tab in
+ * every window, so a tab the user happened to open while a run was in flight
+ * looked exactly like the one Indeed had just opened for us -- and the runner
+ * would adopt it, drive it, and then close it along with its window.
+ */
 async function openTabIds(): Promise<Set<number>> {
   const tabs = await chrome.tabs.query({}).catch(() => [])
-  return new Set(tabs.map((t) => t.id).filter((id): id is number => typeof id === 'number'))
+  return new Set(
+    tabs
+      .filter((t) => isOwnedWindow(t.windowId))
+      .map((t) => t.id)
+      .filter((id): id is number => typeof id === 'number')
+  )
 }
 
 /**
@@ -121,7 +133,12 @@ async function adoptNewTab(before: Set<number>, tab: WorkerTab, timeoutMs = 8000
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const tabs = await chrome.tabs.query({}).catch(() => [])
-    const fresh = tabs.find((t) => typeof t.id === 'number' && !before.has(t.id))
+    // Only a tab that appeared inside one of our own windows counts. Indeed
+    // opens its form from the window we are driving, so the real one always
+    // satisfies this; a tab the user opened elsewhere never does.
+    const fresh = tabs.find(
+      (t) => typeof t.id === 'number' && !before.has(t.id) && isOwnedWindow(t.windowId)
+    )
     if (fresh?.id !== undefined) {
       // Keep the original around rather than closing it: the finally block
       // closes both, and closing it here would race the navigation.
