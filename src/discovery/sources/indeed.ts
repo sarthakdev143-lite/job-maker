@@ -29,7 +29,7 @@
  */
 
 import { createLogger } from '@/shared/logger'
-import { pause, sleep } from '@/shared/util'
+import { jitter, pause, sleep } from '@/shared/util'
 import { durableSleep } from '@/shared/keepalive'
 import { closeWorkerWindow, openWorkerWindow } from '@/shared/windows'
 import { activity } from '@/shared/activity'
@@ -76,6 +76,15 @@ export const DEFAULT_ROLE_PHRASES = [
 /** Results per Indeed page. Their pagination is a multiple of this. */
 const PAGE_SIZE = 10
 
+/**
+ * How many challenged pages in a row before abandoning the sweep.
+ *
+ * Once Indeed has decided to challenge us, every further request confirms the
+ * suspicion and risks escalating a soft check into an IP-level block. Two
+ * strikes is enough to know.
+ */
+const MAX_CONSECUTIVE_BLOCKS = 2
+
 export type ScrapedCard = {
   title: string
   company: string
@@ -112,7 +121,9 @@ export function buildIndeedUrls(recipe: SearchRecipe, options: IndeedUrlOptions 
   const phrases = (options.phrases ?? recipe.keywords).map((p) => p.trim()).filter(Boolean)
   const roles = phrases.length > 0 ? phrases : DEFAULT_ROLE_PHRASES
   const domains = options.domains ?? INDEED_DOMAINS
-  const pages = Math.max(1, options.pages ?? 3)
+  // Two pages, not three. Every extra URL is another window into Indeed's
+  // rate limiter, and page three of a date-sorted search is mostly repeats.
+  const pages = Math.max(1, options.pages ?? 2)
   const maxAgeDays = options.maxAgeDays ?? 7
 
   const urls: string[] = []
@@ -141,8 +152,15 @@ export function viewJobUrl(domain: string, jobKey: string): string {
 
 /* ---------------------------------------------------------- tab utilities */
 
-async function openWorkerTab(url: string): Promise<{ tabId: number; windowId: number }> {
-  return openWorkerWindow(url, { minimized: true })
+async function openWorkerTab(
+  url: string,
+  options: { visible?: boolean } = {}
+): Promise<{ tabId: number; windowId: number }> {
+  // Minimized by default so a long run stays out of the way. Chrome throttles
+  // timers in hidden windows, though, which can starve a Cloudflare challenge
+  // of the very JS it needs to complete -- so the retry path asks for a
+  // visible (but unfocused) window instead.
+  return openWorkerWindow(url, { minimized: !options.visible })
 }
 
 async function waitForLoad(tabId: number, timeoutMs = 30000): Promise<void> {
@@ -276,16 +294,55 @@ function scrapeIndeedCards(): ScrapedCard[] {
  * indistinguishable from "no remote jobs today", and the run reports a
  * cheerful nothing for hours.
  */
-function detectBlockPage(): string {
+/**
+ * Tell a challenge that is still working itself out from one that has stopped.
+ *
+ * This distinction is the whole thing. Cloudflare's "Just a moment" page is a
+ * *transient* interstitial that clears itself within a few seconds; the first
+ * version of this function reported it as a block, and the caller closed the
+ * window on the spot -- so a page that was about to load fine was thrown away
+ * every time, and the run then hammered the next of forty-eight URLs into an
+ * increasingly annoyed rate limiter.
+ *
+ * 'none' means there are results, or at least no challenge. 'transient' means
+ * wait. 'hard' means a person has to intervene and retrying will not help.
+ */
+export function classifyBlockPage(): 'none' | 'transient' | 'hard' {
   const body = (document.body?.innerText ?? '').slice(0, 2000)
-  if (/verify you are human|are you a robot|unusual traffic|access denied/i.test(body)) {
-    return 'Indeed served a bot check instead of results'
+
+  // A visible, interactive challenge. Not solvable from here, by policy and in
+  // practice.
+  if (/verify you are human|are you a robot|unusual traffic|access denied/i.test(body)) return 'hard'
+  if (document.querySelector('iframe[src*="challenges.cloudflare"], #challenge-stage')) return 'hard'
+
+  // Still settling.
+  if (/just a moment|checking your browser|verifying you are/i.test(body)) return 'transient'
+  if (document.querySelector('#challenge-form, #challenge-running')) return 'transient'
+
+  // Cards present means we are plainly through.
+  if (document.querySelector('div.job_seen_beacon, [data-testid="slider_item"], div.cardOutline')) return 'none'
+
+  // No challenge and no cards: an empty result set, which is a normal outcome.
+  return 'none'
+}
+
+/**
+ * Give a Cloudflare interstitial time to clear before calling it a block.
+ *
+ * Polls rather than sleeping once, so the common case -- a challenge that
+ * passes in three seconds -- costs three seconds rather than the whole timeout.
+ */
+async function settleChallenge(tabId: number, timeoutMs = 25_000): Promise<'none' | 'hard'> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const verdict = (await runInTab(tabId, classifyBlockPage)) ?? 'transient'
+    if (verdict === 'none') return 'none'
+    if (verdict === 'hard') return 'hard'
+    activity.note('waiting for a browser check to clear')
+    await sleep(2000)
   }
-  if (/just a moment|checking your browser/i.test(body)) return 'Cloudflare interstitial'
-  if (document.querySelector('#challenge-form, iframe[src*="challenges.cloudflare"]')) {
-    return 'Cloudflare challenge form'
-  }
-  return ''
+  // A challenge that never finishes is, for our purposes, one we cannot pass.
+  return 'hard'
 }
 
 /* -------------------------------------------------------------- discovery */
@@ -294,6 +351,27 @@ export async function fetchIndeed(recipe: SearchRecipe, options: IndeedUrlOption
   const urls = recipe.customUrls.length > 0 ? recipe.customUrls : buildIndeedUrls(recipe, options)
   const jobs: Job[] = []
   let blocked = 0
+  let consecutiveBlocks = 0
+
+  const collect = (cards: ScrapedCard[]): void => {
+    for (const card of cards) {
+      if (jobs.length >= recipe.maxResultsPerRun) break
+      const job = makeJob({
+        source: 'indeed',
+        vendor: 'indeed',
+        url: card.url,
+        company: card.company,
+        title: card.title,
+        location: card.location || 'Remote',
+        descriptionText: card.snippet,
+        postedAt: null, // relative text; parsed by the caller via parsePostedDate
+        salaryText: card.salaryText,
+        recipeId: recipe.id,
+      })
+      job.easyApply = card.easyApply
+      jobs.push(job)
+    }
+  }
 
   for (const [index, url] of urls.entries()) {
     if (jobs.length >= recipe.maxResultsPerRun) break
@@ -301,56 +379,82 @@ export async function fetchIndeed(recipe: SearchRecipe, options: IndeedUrlOption
     const host = new URL(url).hostname
     activity.note(`searching ${host} (${index + 1} of ${urls.length})`)
 
+    let retryWindowId: number | null = null
     const { tabId, windowId } = await openWorkerTab(url)
     try {
       await waitForLoad(tabId)
 
-      const block = await runInTab(tabId, detectBlockPage)
-      if (block) {
+      // Wait the challenge out rather than treating it as a failure. Most
+      // clear in a few seconds and the page then loads normally.
+      let verdict = await settleChallenge(tabId)
+
+      // A challenge that will not clear in a minimized window is often just
+      // starved: Chrome throttles hidden windows hard enough that Cloudflare's
+      // own script cannot finish. Give it one honest try in a visible one
+      // before concluding we are actually blocked.
+      if (verdict === 'hard') {
+        log.info(`${host}: retrying the browser check in a visible window`)
+        activity.note('retrying the browser check in a visible window')
+        await closeWorkerWindow(windowId)
+        const retry = await openWorkerTab(url, { visible: true })
+        retryWindowId = retry.windowId
+        await waitForLoad(retry.tabId)
+        verdict = await settleChallenge(retry.tabId, 30_000)
+        if (verdict === 'none') {
+          await humanScroll(retry.tabId)
+          const retried = (await runInTab(retry.tabId, scrapeIndeedCards)) ?? []
+          activity.note(`read ${retried.length} listing(s) from ${host}`)
+          collect(retried)
+          consecutiveBlocks = 0
+          continue
+        }
+      }
+
+      if (verdict === 'hard') {
         blocked++
-        log.warn(`${host}: ${block}`)
+        consecutiveBlocks++
+        log.warn(`${host}: bot check did not clear (${consecutiveBlocks} in a row)`)
+
+        // Stop early. Forty-eight windows into a rate limiter is what turns a
+        // soft challenge into a hard IP block, and none of them would have
+        // returned anything anyway.
+        if (consecutiveBlocks >= MAX_CONSECUTIVE_BLOCKS) {
+          log.error(`Indeed is challenging every request; abandoning this sweep after ${blocked} attempt(s)`)
+          activity.note('Indeed is asking for human verification; pausing this search')
+          break
+        }
+
         activity.note(`${host} served a bot check; backing off`)
-        // Backing off matters more than this one page: hammering through a
-        // challenge is what turns a soft block into a hard one.
-        await durableSleep(30_000)
+        await durableSleep(60_000)
         continue
       }
+      consecutiveBlocks = 0
 
       await humanScroll(tabId)
       const cards = (await runInTab(tabId, scrapeIndeedCards)) ?? []
       activity.note(`read ${cards.length} listing(s) from ${host}`)
-      log.info(`Indeed: ${cards.length} card(s) from ${url}`)
-
-      for (const card of cards) {
-        if (jobs.length >= recipe.maxResultsPerRun) break
-        const job = makeJob({
-          source: 'indeed',
-          vendor: 'indeed',
-          url: card.url,
-          company: card.company,
-          title: card.title,
-          location: card.location || 'Remote',
-          descriptionText: card.snippet,
-          postedAt: null, // relative text; parsed by the caller via parsePostedDate
-          salaryText: card.salaryText,
-          recipeId: recipe.id,
-        })
-        job.easyApply = card.easyApply
-        jobs.push(job)
-      }
+      log.info(`Indeed: ${cards.length} card(s) from ${host}`)
+      collect(cards)
     } catch (e) {
-      log.debug(`Indeed search failed for ${url}`, { error: (e as Error).message })
+      log.debug(`Indeed search failed for ${host}`, { error: (e as Error).message })
     } finally {
       await closeWorkerWindow(windowId)
+      if (retryWindowId !== null) {
+        await closeWorkerWindow(retryWindowId)
+        retryWindowId = null
+      }
     }
 
-    await pause({ min: 2500, max: 6000 })
+    // Paced like a person reading results, not a crawler. The old 2.5-6s gap
+    // across dozens of windows is itself what provoked the challenge.
+    await durableSleep(jitter(6000, 14000))
   }
 
   if (blocked > 0 && jobs.length === 0) {
     throw new Error(
-      `Indeed served a bot check on all ${blocked} search page(s) and returned no jobs. ` +
-        'Open indeed.com in this browser, complete any challenge, and make sure you are signed in.'
+      `Indeed asked for human verification on all ${blocked} search page(s) and returned no jobs. ` +
+        'Open indeed.com in this browser, complete the check once by hand, then start the agent again. ' +
+        'If it keeps happening, reduce the number of searches or wait an hour before retrying.'
     )
   }
 
