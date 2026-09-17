@@ -212,7 +212,7 @@ class LlmBroker {
 
         const text = await this.attempt(
           driver,
-          { ...req, prompt: promptForAttempt },
+          { ...req, prompt: promptForAttempt, jsonMode: true },
           llm.maxRetries,
           `${label}#${attempt}`,
           fallback
@@ -223,15 +223,39 @@ class LlmBroker {
         } catch (e) {
           if (!(e instanceof StructuredParseError)) throw e
           lastParseError = e
+          const isNoJson = /No JSON found/i.test(e.message)
           log.warn(`${label}: model reply failed validation, retrying`, {
             error: e.message,
             raw: e.raw.slice(0, 400),
           })
+          // Diffusion/instruct models sometimes need an extra nudge. If the
+          // first attempt produced no JSON at all, the retryInstruction alone
+          // is not enough — the JSON_CONTRACT will be re-sent on the next loop.
+          if (isNoJson && attempt === 0) continue
+        }
+      }
+
+      // Transport retries exhausted and still no valid JSON. If we have a
+      // fallback (DeepSeek web), try it once — Llama/Mixtral often succeed
+      // where diffusion models return prose.
+      if (fallback && lastParseError && /No JSON found|failed validation/i.test(lastParseError.message)) {
+        try {
+          const fbHealth = await fallback.health()
+          if (fbHealth.status === 'ok') {
+            log.warn(`${label}: ${driver.label} returned no JSON; trying fallback ${fallback.label}`)
+            activity.note(`${driver.label} returned no JSON; retrying via ${fallback.label}`)
+            const fbText = await fallback.complete({ prompt: `${req.prompt}\n\n${JSON_CONTRACT}\n\n${retryInstruction(lastParseError)}`, jsonMode: true })
+            return parseStructured(fbText, req.schema)
+          }
+        } catch (fbError) {
+          // Fall through to the final error below — include both causes.
+          log.warn(`${label}: fallback also failed`, { error: (fbError as Error).message })
         }
       }
 
       throw new LlmError(
-        `Model never returned valid JSON for ${label}: ${lastParseError?.message ?? 'unknown'}`,
+        `Model never returned valid JSON for ${label}: ${lastParseError?.message ?? 'unknown'}. ` +
+          `If using google/diffusiongemma, switch to meta/llama-3.1-70b-instruct or meta/llama-3.1-405b-instruct — diffusion models are not tuned for strict JSON.`,
         'transport'
       )
     })

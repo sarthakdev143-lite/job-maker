@@ -205,7 +205,12 @@ export function err(error: string): Err {
 
 /** Typed wrapper around chrome.runtime.sendMessage for UI surfaces. */
 export async function sendToWorker<T = unknown>(msg: UiRequest): Promise<T> {
-  const res = (await chrome.runtime.sendMessage(msg)) as Result<T> | undefined
+  let res: Result<T> | undefined
+  try {
+    res = (await chrome.runtime.sendMessage(msg)) as Result<T> | undefined
+  } catch (e) {
+    throw new Error(explainWorkerError((e as Error).message))
+  }
   if (!res) throw new Error('No response from background worker')
   if (!res.ok) throw new Error(explainWorkerError(res.error))
   return res.data
@@ -222,6 +227,16 @@ export function explainWorkerError(error: string): string {
     return (
       'The background worker is running an older build of the extension. ' +
       'Open chrome://extensions and press Reload on this extension, then reopen this panel.'
+    )
+  }
+  // Chrome tore down the service worker mid-request -- normally because the
+  // request ran long enough to be evicted, or the panel/tab that sent it was
+  // closed first. The worker itself is not broken; whatever it was doing may
+  // have completed anyway (check the log), but this specific reply was lost.
+  if (/message channel closed|message port closed|Could not establish connection/i.test(error)) {
+    return (
+      'The background worker restarted before it finished replying (this can happen on a slow model ' +
+      'request). Check the Log tab to see whether it actually completed, then try again.'
     )
   }
   return error

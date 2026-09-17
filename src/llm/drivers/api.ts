@@ -142,20 +142,43 @@ export class OpenAiCompatibleDriver implements LlmDriver {
     // timeout. Respect the user's configured timeout (default 180s).
     const timeoutMs = req.timeoutMs ?? this.config.requestTimeoutMs
 
+    const baseBody: Record<string, unknown> = {
+      model: this.config.model || this.defaultModel(),
+      messages,
+      temperature: 0.3,
+      max_tokens: 4096,
+    }
+    // Prefer JSON object mode for structured calls — fixes diffusion/instruct
+    // models that return prose. If the provider does not support
+    // response_format (some NIM models like gpt-oss return 400), we retry
+    // once without it rather than failing the whole resume import.
+    const withJsonMode = req.jsonMode ? { ...baseBody, response_format: { type: 'json_object' } } : baseBody
+    const withoutJsonMode = baseBody
+
     let res: Response
+    let usedJsonMode = Boolean(req.jsonMode)
     try {
       res = await fetchWithTimeout(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-        body: JSON.stringify({
-          model: this.config.model || this.defaultModel(),
-          messages,
-          temperature: 0.3,
-          max_tokens: 4096,
-        }),
+        body: JSON.stringify(withJsonMode),
         timeoutMs,
         label: 'Chat completion request',
       })
+      if (!res.ok && req.jsonMode && res.status === 400) {
+        const peek = await res.clone().text().catch(() => '')
+        if (/response_format|json_object/i.test(peek)) {
+          // Retry without the hint — the model can still produce JSON via prompt alone.
+          res = await fetchWithTimeout(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+            body: JSON.stringify(withoutJsonMode),
+            timeoutMs,
+            label: 'Chat completion request (retry without json_object)',
+          })
+          usedJsonMode = false
+        }
+      }
     } catch (e) {
       throw new LlmError(friendlyFetchError(e as Error, url, timeoutMs), 'transport')
     }
@@ -163,7 +186,13 @@ export class OpenAiCompatibleDriver implements LlmDriver {
     if (!res.ok) {
       const detail = await res.text().catch(() => '')
       const code = res.status === 401 || res.status === 403 ? 'config' : res.status === 429 ? 'busy' : 'transport'
-      throw new LlmError(`Chat API ${res.status}: ${detail.slice(0, 300)}`, code)
+      const hint =
+        res.status === 404 && /model/i.test(detail)
+          ? ` Check that "${this.config.model}" is exactly as listed at build.nvidia.com — e.g. meta/llama-3.1-70b-instruct, not openai/gpt-oss-20b if that slug is not hosted.`
+          : usedJsonMode
+            ? ''
+            : ''
+      throw new LlmError(`Chat API ${res.status}: ${detail.slice(0, 300)}${hint}`, code)
     }
 
     const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> }

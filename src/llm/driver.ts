@@ -19,6 +19,8 @@ export type CompleteRequest = {
   timeoutMs?: number
   /** Hint that this is a fresh topic, so the web driver opens a new chat. */
   freshContext?: boolean
+  /** When true, API drivers should request JSON object mode if the provider supports it. */
+  jsonMode?: boolean
 }
 
 export interface LlmDriver {

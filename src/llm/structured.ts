@@ -151,7 +151,13 @@ function escapeNewlinesInStrings(text: string): string {
 
 export function parseLoose(text: string): unknown {
   const candidate = extractJsonCandidate(text)
-  if (candidate === null) throw new StructuredParseError('No JSON found in model reply', text)
+  if (candidate === null) {
+    const preview = text.slice(0, 600).replace(/\s+/g, ' ').trim()
+    throw new StructuredParseError(
+      `No JSON found in model reply${preview ? ` (preview: ${preview.slice(0, 200)}…)` : ''}`,
+      text
+    )
+  }
   try {
     return JSON.parse(candidate)
   } catch {

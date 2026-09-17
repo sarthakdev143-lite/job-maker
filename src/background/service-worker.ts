@@ -40,6 +40,7 @@ import { errorMessage } from '@/shared/util'
 import { formAgentFiles } from '@/shared/injection'
 import { activity } from '@/shared/activity'
 import { BUILD_ID } from '@/shared/build'
+import { startHeartbeat } from '@/shared/keepalive'
 import type { DeepSeekProgress } from '@/shared/messages'
 
 const log = createLogger('worker')
@@ -318,9 +319,25 @@ chrome.runtime.onMessage.addListener((msg: DeepSeekProgress) => {
 
 chrome.runtime.onMessage.addListener((msg: UiRequest, _sender, sendResponse) => {
   if (!msg || typeof msg !== 'object' || !String(msg.type ?? '').startsWith('ui:')) return false
+
+  // A request that outlives the ~30s MV3 idle window gets its worker evicted
+  // mid-flight, which destroys the message port along with it -- the
+  // sendResponse below then fires into a channel that already closed, and the
+  // panel sees "A listener indicated an asynchronous response ... but the
+  // message channel closed before a response was received" with no further
+  // detail. Slow requests are not rare: an LLM call with transport retries,
+  // a login-fallback health check, and a schema retry can run for minutes.
+  // Poking an extension API for the lifetime of every request, not just
+  // during an agent run, keeps the worker (and therefore the port) alive for
+  // exactly as long as the caller is actually waiting.
+  const heartbeat = startHeartbeat()
   void route(msg).then(
-    (data) => sendResponse(ok(data)),
+    (data) => {
+      heartbeat.stop()
+      sendResponse(ok(data))
+    },
     (e) => {
+      heartbeat.stop()
       log.error(`Request ${msg.type} failed: ${errorMessage(e)}`)
       sendResponse(err(errorMessage(e)))
     }
