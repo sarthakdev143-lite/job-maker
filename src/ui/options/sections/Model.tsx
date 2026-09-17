@@ -70,6 +70,7 @@ export default function ModelSection({
               onChange={(v) => set({ driver: v })}
               options={[
                 { value: 'deepseek-web', label: 'DeepSeek web chat (free, no API key)' },
+                { value: 'nvidia-nim', label: 'NVIDIA NIM (API key, recommended)' },
                 { value: 'anthropic-api', label: 'Claude API (API key)' },
                 { value: 'openai-compatible', label: 'OpenAI-compatible API (DeepSeek paid, Groq, Ollama…)' },
               ]}
@@ -109,12 +110,36 @@ export default function ModelSection({
               <TextInput
                 value={llm.model}
                 onChange={(v) => set({ model: v })}
-                placeholder={llm.driver === 'anthropic-api' ? 'claude-sonnet-5' : 'deepseek-chat'}
+                placeholder={
+                  llm.driver === 'anthropic-api'
+                    ? 'claude-sonnet-5'
+                    : llm.driver === 'nvidia-nim'
+                      ? 'meta/llama-3.1-405b-instruct'
+                      : 'deepseek-chat'
+                }
               />
             </Field>
-            <Field label="Base URL" hint="Leave blank for the provider default.">
+            <Field
+              label="Base URL"
+              hint={
+                llm.driver === 'nvidia-nim'
+                  ? 'Leave blank for integrate.api.nvidia.com. Only change this for a self-hosted NIM.'
+                  : 'Leave blank for the provider default.'
+              }
+            >
               <TextInput value={llm.apiBaseUrl} onChange={(v) => set({ apiBaseUrl: v })} />
             </Field>
+          </div>
+        )}
+
+        {llm.driver === 'nvidia-nim' && (
+          <div className="surface-quiet mt-3 px-3 py-2.5">
+            <p className="text-[12px]">
+              Uses your NVIDIA NIM key over its OpenAI-compatible endpoint. Any instruct model works; larger ones
+              follow the answer format more reliably. If NIM is unreachable mid-run, the agent fails over to the
+              DeepSeek web tab for that request rather than parking the application — keep that tab signed in as a
+              safety net. A wrong key fails fast with a clear error instead of silently falling back.
+            </p>
           </div>
         )}
 

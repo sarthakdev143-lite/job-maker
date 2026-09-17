@@ -152,6 +152,13 @@ export async function startAutopilot(): Promise<AutopilotResult> {
       // two failures that look like "blocked" and "model timeout" at 3am. An
       // unfocused visible window costs nothing overnight and removes both.
       keepWindowMinimized: false,
+      // API calls answer in seconds, so a hung one should fail over to the web
+      // fallback quickly rather than burning the full web-scale timeout on
+      // every retry. Web driver keeps whatever the user configured.
+      requestTimeoutMs:
+        settings.llm.driver === 'deepseek-web'
+          ? settings.llm.requestTimeoutMs
+          : Math.min(settings.llm.requestTimeoutMs, 90_000),
     },
     enabledSites: {
       ...settings.enabledSites,

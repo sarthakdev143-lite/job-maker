@@ -64,7 +64,20 @@ export default defineManifest({
     'downloads',
   ],
 
-  host_permissions: ['https://chat.deepseek.com/*', ...BOARD_API_MATCHES, ...APPLY_MATCHES],
+  host_permissions: [
+    'https://chat.deepseek.com/*',
+    // LLM API endpoints: required so the service worker can fetch them
+    // without a CORS preflight failure ("Failed to fetch"). Optional
+    // `https://*/*` exists for custom bases, but the common providers must
+    // work without an extra permission prompt.
+    'https://integrate.api.nvidia.com/*',
+    'https://api.nvidia.com/*',
+    'https://api.deepseek.com/*',
+    'https://api.anthropic.com/*',
+    'https://api.openai.com/*',
+    ...BOARD_API_MATCHES,
+    ...APPLY_MATCHES,
+  ],
 
   // Granted on request, so a user can add a company that hosts its own form.
   optional_host_permissions: ['https://*/*'],

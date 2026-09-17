@@ -169,7 +169,15 @@ export function parseLoose(text: string): unknown {
 
 /** Parse and validate. Throws StructuredParseError with the raw text attached. */
 export function parseStructured<S extends ZodTypeAny>(text: string, schema: S): TypeOf<S> {
-  const value = parseLoose(text)
+  let value: unknown = parseLoose(text)
+
+  // Some instruct models (notably NIM's Llama) wrap the object in a single-element
+  // array despite the prompt saying "single object". Unwrap that rather than
+  // failing the resume import with "Expected object, received array".
+  if (Array.isArray(value) && value.length === 1) {
+    value = value[0]
+  }
+
   const result = schema.safeParse(value)
   if (!result.success) {
     const issues = result.error.issues
@@ -183,9 +191,12 @@ export function parseStructured<S extends ZodTypeAny>(text: string, schema: S): 
 
 /** Feedback appended to a retry prompt after a parse or validation failure. */
 export function retryInstruction(error: StructuredParseError): string {
+  const arrayHint = /received array/i.test(error.message)
+    ? ' Do not wrap the object in an array — return a single JSON object.'
+    : ''
   return [
     'Your previous reply could not be used.',
-    `Problem: ${error.message}`,
+    `Problem: ${error.message}.${arrayHint}`,
     'Reply again with ONLY one fenced json code block containing valid JSON matching the requested shape. No prose.',
   ].join('\n')
 }

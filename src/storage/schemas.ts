@@ -257,7 +257,7 @@ export type AutonomyMode = z.infer<typeof AutonomyModeSchema>
 /* -------------------------------------------------------------- llm config */
 
 export const LlmConfigSchema = z.object({
-  driver: z.enum(['deepseek-web', 'anthropic-api', 'openai-compatible']).default('deepseek-web'),
+  driver: z.enum(['deepseek-web', 'anthropic-api', 'openai-compatible', 'nvidia-nim']).default('deepseek-web'),
   apiKey: z.string().default(''),
   apiBaseUrl: z.string().default(''),
   model: z.string().default(''),

@@ -8,7 +8,7 @@
  */
 
 import { DeepSeekWebDriver } from './drivers/deepseek-web'
-import { AnthropicDriver, OpenAiCompatibleDriver } from './drivers/api'
+import { AnthropicDriver, NimDriver, OpenAiCompatibleDriver } from './drivers/api'
 import { LlmError, isRetryable, type CompleteRequest, type LlmDriver, type LlmHealth } from './driver'
 import { JSON_CONTRACT } from '@/storage/defaults'
 import { StructuredParseError, parseStructured, retryInstruction } from './structured'
@@ -31,6 +31,16 @@ type QueueTask<T> = {
 class LlmBroker {
   private driver: LlmDriver | null = null
   private driverId = ''
+  /**
+   * Second priority behind any API driver: the free web driver.
+   *
+   * Built lazily and keyed on the primary driver id, so switching providers
+   * never leaves a stale fallback behind. Permanent primary errors (a bad key)
+   * fail fast and never reach it -- it only sees transient failures a retry
+   * might survive.
+   */
+  private fallback: LlmDriver | null = null
+  private fallbackFor = ''
   private queue: Array<QueueTask<unknown>> = []
   private draining = false
   private lastHealth: { status: LlmHealth; detail: string; at: number } | null = null
@@ -41,6 +51,8 @@ class LlmBroker {
     switch (config.driver) {
       case 'anthropic-api':
         return new AnthropicDriver(config)
+      case 'nvidia-nim':
+        return new NimDriver(config)
       case 'openai-compatible':
         return new OpenAiCompatibleDriver(config)
       case 'deepseek-web':
@@ -68,7 +80,28 @@ class LlmBroker {
     await this.driver?.dispose?.()
     this.driver = null
     this.driverId = ''
+    await this.fallback?.dispose?.().catch(() => {})
+    this.fallback = null
+    this.fallbackFor = ''
     this.lastHealth = null
+  }
+
+  /**
+   * The web driver behind an API primary, or null when the web driver *is* the
+   * primary. Constructing it touches nothing -- no tab opens until the first
+   * failover -- so keeping one warm costs nothing on a healthy night.
+   */
+  private async getFallbackDriver(primary: LlmDriver, config: LlmConfig): Promise<LlmDriver | null> {
+    if (primary.id === 'deepseek-web') return null
+    if (!this.fallback || this.fallbackFor !== config.driver) {
+      await this.fallback?.dispose?.().catch(() => {})
+      this.fallback = new DeepSeekWebDriver(config)
+      this.fallbackFor = config.driver
+      log.info(`LLM fallback set to ${this.fallback.label}`)
+    } else {
+      ;(this.fallback as { updateConfig?: (c: LlmConfig) => void }).updateConfig?.(config)
+    }
+    return this.fallback
   }
 
   /* ----------------------------------------------------------------- queue */
@@ -125,12 +158,21 @@ class LlmBroker {
 
   async openLogin(): Promise<void> {
     const driver = await this.getDriver()
-    await driver.openLogin?.()
+    if (driver.openLogin) {
+      await driver.openLogin()
+      return
+    }
+    // API primaries have no login page; prepare the fallback instead, since a
+    // signed-in tab is what the night falls back on.
+    const { llm } = await getSettings()
+    const fallback = await this.getFallbackDriver(driver, llm)
+    await fallback?.openLogin?.()
   }
 
   async reset(): Promise<void> {
     const driver = await this.getDriver()
     await driver.reset?.()
+    await this.fallback?.reset?.().catch(() => {})
   }
 
   /* -------------------------------------------------------------- requests */
@@ -140,7 +182,8 @@ class LlmBroker {
     return this.enqueue(label, async () => {
       const driver = await this.getDriver()
       const { llm } = await getSettings()
-      return this.attempt(driver, req, llm.maxRetries, label)
+      const fallback = await this.getFallbackDriver(driver, llm)
+      return this.attempt(driver, req, llm.maxRetries, label, fallback)
     })
   }
 
@@ -156,6 +199,7 @@ class LlmBroker {
     return this.enqueue(label, async () => {
       const driver = await this.getDriver()
       const { llm } = await getSettings()
+      const fallback = await this.getFallbackDriver(driver, llm)
       const prompt = `${req.prompt}\n\n${JSON_CONTRACT}`
 
       let lastParseError: StructuredParseError | null = null
@@ -170,7 +214,8 @@ class LlmBroker {
           driver,
           { ...req, prompt: promptForAttempt },
           llm.maxRetries,
-          `${label}#${attempt}`
+          `${label}#${attempt}`,
+          fallback
         )
 
         try {
@@ -197,7 +242,8 @@ class LlmBroker {
     driver: LlmDriver,
     req: CompleteRequest,
     retries: number,
-    label: string
+    label: string,
+    fallback: LlmDriver | null = null
   ): Promise<string> {
     let lastError: unknown
     for (let i = 0; i <= retries; i++) {
@@ -224,6 +270,38 @@ class LlmBroker {
         if (e instanceof LlmError && (e.code === 'timeout' || e.code === 'busy')) {
           await driver.reset?.().catch(() => {})
         }
+      }
+    }
+    // The primary exhausted its retries on a transient failure. Fail over to
+    // second priority for this request rather than parking the application --
+    // a bad key never reaches here (it throws above), so this is an outage or
+    // rate limit, exactly what a fallback is for.
+    if (fallback) {
+      // No point waiting 3 minutes for a fallback that is not signed in.
+      try {
+        const fbHealth = await fallback.health()
+        if (fbHealth.status !== 'ok') {
+          log.warn(`${label}: ${driver.label} failed (${errorMessage(lastError)}); fallback ${fallback.label} not ready (${fbHealth.detail})`)
+          throw new LlmError(
+            `${driver.label} failed (${errorMessage(lastError)}); fallback ${fallback.label} not ready: ${fbHealth.detail}. ` +
+              `Fix the NIM key/model or sign in to chat.deepseek.com for fallback.`,
+            'transport'
+          )
+        }
+      } catch (e) {
+        if (e instanceof LlmError) throw e
+        // Health check itself failed — proceed to try fallback anyway.
+      }
+      log.warn(`${label}: ${driver.label} failed (${errorMessage(lastError)}); failing over to ${fallback.label}`)
+      activity.note(`${driver.label} failed; retrying via ${fallback.label}`)
+      try {
+        return await fallback.complete(req)
+      } catch (e) {
+        throw new LlmError(
+          `${label}: ${driver.label} failed (${errorMessage(lastError)}); ` +
+            `${fallback.label} fallback also failed (${errorMessage(e)})`,
+          e instanceof LlmError ? e.code : 'transport'
+        )
       }
     }
     throw lastError instanceof Error ? lastError : new LlmError(String(lastError), 'transport')

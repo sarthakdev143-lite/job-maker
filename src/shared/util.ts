@@ -102,6 +102,25 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label = 'operation'): 
   })
 }
 
+/** Fetch that actually aborts the request on timeout, so a hung API does not wedge the queue for minutes. */
+export async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit & { timeoutMs: number; label?: string }
+): Promise<Response> {
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), init.timeoutMs)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') {
+      throw new Error(`${init.label ?? 'request'} timed out after ${init.timeoutMs}ms`)
+    }
+    throw e
+  } finally {
+    clearTimeout(t)
+  }
+}
+
 export function errorMessage(e: unknown): string {
   if (e instanceof Error) return e.message
   if (typeof e === 'string') return e

@@ -171,7 +171,7 @@ RULES - these matter more than completeness
 - "workAuthorization.authorizedInCountries" is only populated when the resume explicitly states work authorisation or citizenship. "requiresSponsorship" is true or false only when the document says so outright, otherwise null.
 - List experience newest first. Include every role, including internships.
 
-Return JSON of exactly this shape:
+Return a single JSON object (not an array) of exactly this shape:
 {"firstName": "", "lastName": "", "email": "", "phone": "", "phoneCountryCode": "", "city": "", "state": "", "country": "", "headline": "", "summary": "", "currentTitle": "", "currentCompany": "", "yearsExperience": 0, "linkedin": "", "github": "", "portfolio": "", "skills": [], "languages": [], "certifications": [], "experience": [{"company": "", "title": "", "location": "", "startDate": "", "endDate": "", "current": false, "bullets": [], "tech": []}], "education": [{"school": "", "degree": "", "field": "", "startDate": "", "endDate": "", "gpa": ""}], "workAuthorization": {"authorizedInCountries": [], "requiresSponsorship": null}}
 `.trim()
 

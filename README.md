@@ -27,7 +27,7 @@ The settings page opens on first install. During development, `npm run dev` give
 
 Do these in order. Steps 1–3 take about fifteen minutes and everything afterwards depends on them.
 
-**1. Sign in to DeepSeek.** Open [chat.deepseek.com](https://chat.deepseek.com) and log in normally. The extension reuses that session; it never sees your password. In settings → **Model**, press *Run test* — you should get a JSON reply back.
+**1. Pick your engine.** Two options, API first: Settings → **Model** → Driver → **NVIDIA NIM**, paste a NIM key from build.nvidia.com and name a model (e.g. `meta/llama-3.1-405b-instruct`), then press *Run test*. If NIM goes down mid-run the agent fails over to the DeepSeek web tab for that request rather than parking the application — so as a safety net, still sign in at [chat.deepseek.com](https://chat.deepseek.com) in this browser. Pure free option: leave the driver on DeepSeek web and just sign in; the extension reuses that session and never sees your password. Either way, press *Run test* — you should get a JSON reply back.
 
 **2. Drop your resume on the Profile page.** Settings → **Profile** → drag a PDF onto the box at the top. The model reads it and fills in everything below: name, contact details, every role with its bullets, education, skills. Takes about half a minute.
 
