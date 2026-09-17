@@ -359,6 +359,15 @@ export const JobSchema = z.object({
   salaryMax: z.number().nullable().default(null),
   postedAt: z.number().nullable().default(null),
   descriptionText: z.string().default(''),
+  /**
+   * Where the description came from.
+   *
+   * Listing cards carry a one-line snippet; hydration (or the apply page
+   * itself) replaces it with the real posting. The prefilter cannot judge
+   * "must mention" rules against a snippet, so it defers them instead of
+   * rejecting nearly everything.
+   */
+  descriptionSource: z.enum(['snippet', 'hydrated', 'apply_page']).default('hydrated'),
   dedupeHash: z.string(),
   status: JobStatusSchema.default('new'),
   matchScore: z.number().nullable().default(null),

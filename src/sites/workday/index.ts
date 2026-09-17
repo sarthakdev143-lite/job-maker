@@ -104,6 +104,24 @@ export const workdayAdapter: SiteAdapter & { requiresAccount: true } = {
     'button[data-automation-id="submitButton"]',
   ],
 
+  /**
+   * The bottom-navigation button reads "Next" on every page and "Submit" only
+   * on the last, and it shares one selector across all of them -- so selector
+   * presence cannot authorize submission. The label is the authority: without
+   * this the runner broke out of the wizard after page one and clicked Next
+   * as if it were Submit, parking every Workday application as a validation
+   * error.
+   */
+  canSubmit(doc: Document): boolean {
+    const buttons = Array.from(
+      doc.querySelectorAll<HTMLElement>(
+        '[data-automation-id="bottom-navigation-next-button"], [data-automation-id="submitButton"], button[type="submit"]'
+      )
+    )
+    if (buttons.length === 0) return false
+    return buttons.some((el) => /^\s*submit/i.test((el.innerText ?? '').trim()))
+  },
+
   successSelectors: ['[data-automation-id="applicationSubmitted"]', '[data-automation-id="confirmationPage"]'],
 
   successPatterns: [...COMMON_SUCCESS_PATTERNS, /you have successfully submitted/i, /application submitted/i],

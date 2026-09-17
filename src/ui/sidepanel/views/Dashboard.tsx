@@ -12,6 +12,7 @@ import { useState } from 'react'
 import { api, openSettings, useAction, useAsync, type PreflightCheck } from '../../shared/api'
 import { Badge, ConfirmButton, Empty, Spinner, Stat } from '../../shared/components'
 import NowCard from './NowCard'
+import LastRun from './LastRun'
 import Autopilot from './Autopilot'
 import { formatRelative } from '@/shared/util'
 import type { AgentState } from '@/shared/messages'
@@ -121,6 +122,8 @@ export default function Dashboard({
           tone={(state?.reviewDepth ?? 0) > 0 ? 'warn' : undefined}
         />
       </div>
+
+      <LastRun tick={state?.updatedAt} />
 
       <div className="surface mb-3 px-3 py-2.5">
         <div className="mb-2 flex items-center justify-between gap-2">

@@ -17,6 +17,7 @@ import { applicationsRepo, jobsRepo } from '@/storage/db'
 import { bumpCounter, getCounter, getProfile, getSettings } from '@/storage/settings'
 import { remember } from '@/storage/answer-bank'
 import { resolveFields } from '@/form/resolver'
+import { isOffLimitsQuestion } from '@/form/guess'
 import { generateDocuments } from '@/documents/tailor'
 import { blobToDataUrl } from '@/documents/pdf'
 import { docsRepo } from '@/storage/db'
@@ -33,7 +34,7 @@ import type { Application, FieldDescriptor, FilledField, Job, Settings } from '@
 import { createLogger } from '@/shared/logger'
 import { errorMessage, pause, sleep, uid, withTimeout } from '@/shared/util'
 import { ensureContentScript, formAgentFiles } from '@/shared/injection'
-import { closeWorkerWindow, isOwnedWindow, openWorkerWindow } from '@/shared/windows'
+import { closeWorkerWindow, isOwnedWindow, openWorkerWindow, rememberOwnedWindow } from '@/shared/windows'
 import { activity } from '@/shared/activity'
 
 const log = createLogger('runner')
@@ -146,6 +147,10 @@ async function adoptNewTab(before: Set<number>, tab: WorkerTab, timeoutMs = 8000
       tab.tabId = fresh.id
       if (fresh.windowId !== undefined) tab.windowId = fresh.windowId
       tab.frameId = undefined
+      // The adopted tab can live in a window we did not create (Indeed opens a
+      // new one). Without recording it, the finally-block close refuses the id
+      // as unowned and the window leaks -- one per application, all night.
+      if (tab.windowId !== undefined) await rememberOwnedWindow(tab.windowId)
       // A tab the browser just opened is usually focused and visible; push it
       // out of the way so an overnight run does not steal the screen.
       await chrome.windows.update(tab.windowId, { state: 'minimized' }).catch(() => {})
@@ -242,6 +247,63 @@ async function ensureAgent(tabId: number): Promise<void> {
   )
 }
 
+/**
+ * Advert-page details read from the already-open tab.
+ *
+ * Volume mode skips discovery hydration, so the job record often carries only
+ * a card snippet. Opening forty advert windows up front to fix that is what
+ * kept the agent "getting ready" instead of applying -- but the apply machine
+ * opens the advert anyway on its way to the form, so it reads the real
+ * description, the authoritative Easy Apply signal, and the off-Indeed apply
+ * link here, at zero extra window cost.
+ */
+async function readAdvertDetails(tabId: number): Promise<{
+  description: string
+  easyApply: boolean
+  applyHref: string
+}> {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const text = (el: Element | null): string => ((el as HTMLElement | null)?.innerText ?? '').trim()
+      const descSelectors = [
+        '#jobDescriptionText',
+        '.jobsearch-JobComponent-description',
+        '[data-testid="jobDescriptionText"]',
+        '.jobDescriptionContent',
+        '[class*="job-desc"]',
+        'main',
+      ]
+      let description = ''
+      for (const sel of descSelectors) {
+        try {
+          const found = text(document.querySelector(sel))
+          if (found.length > description.length) description = found
+        } catch {
+          // Try the next selector.
+        }
+      }
+      if (description.length < 200) description = (document.body?.innerText ?? '').slice(0, 20000)
+
+      const applyEl = document.querySelector(
+        '#indeedApplyButton, [data-testid^="indeedApplyButton"], .jobsearch-IndeedApplyButton, #applyButtonLinkContainer a, a[href*="/applystart"]'
+      ) as HTMLAnchorElement | null
+      const applyHref = applyEl instanceof HTMLAnchorElement ? applyEl.href : ''
+      const pageText = (document.body?.innerText ?? '').slice(0, 4000)
+      const easyApply =
+        Boolean(
+          document.querySelector(
+            '#indeedApplyButton, [data-testid^="indeedApplyButton"], .jobsearch-IndeedApplyButton'
+          )
+        ) || /easily apply|apply with indeed/i.test(pageText)
+
+      return { description: description.slice(0, 20000), easyApply, applyHref }
+    },
+  })
+  const value = result?.result as { description: string; easyApply: boolean; applyHref: string } | undefined
+  return value ?? { description: '', easyApply: false, applyHref: '' }
+}
+
 /** Click the adapter's "apply" entry point, when the form is behind one. */
 async function clickApplyEntry(tabId: number, selectors: string[]): Promise<boolean> {
   if (selectors.length === 0) return false
@@ -276,7 +338,8 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
     log.debug(`step: ${name}${detail ? ` (${detail})` : ''}`, undefined, jobId)
   }
 
-  const [job, settings, profile] = await Promise.all([jobsRepo.get(jobId), getSettings(), getProfile()])
+  const [settings, profile] = await Promise.all([getSettings(), getProfile()])
+  let job = await jobsRepo.get(jobId)
   if (!job) throw new Error(`Job ${jobId} not found`)
 
   const application = await ensureApplication(job)
@@ -304,6 +367,36 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
 
     if (!detect.isApplicationForm) {
       step('enter form')
+      // The record may carry only a card snippet (volume mode skips hydration).
+      // Backfill from the live advert before answering anything: the prompts
+      // downstream all read this job object, and a one-line description makes
+      // every screening answer generic.
+      try {
+        const advert = await readAdvertDetails(tab.tabId)
+        if (advert.description.length > job.descriptionText.length) {
+          job = { ...job, descriptionText: advert.description, descriptionSource: 'apply_page' }
+          await jobsRepo.update(job.id, {
+            descriptionText: advert.description,
+            descriptionSource: 'apply_page',
+          })
+        }
+        if (advert.easyApply && !job.easyApply) {
+          job = { ...job, easyApply: true }
+          await jobsRepo.update(job.id, { easyApply: true })
+        }
+        if (advert.applyHref) {
+          try {
+            if (!/indeed\.com/.test(new URL(advert.applyHref, job.url).hostname)) {
+              job = { ...job, applyUrl: advert.applyHref }
+              await jobsRepo.update(job.id, { applyUrl: advert.applyHref })
+            }
+          } catch {
+            // An href we cannot parse is not worth failing the application over.
+          }
+        }
+      } catch {
+        // Best effort: the advert is still drivable without the backfill.
+      }
       const tabsBefore = await openTabIds()
       const clicked = await clickApplyEntry(tab.tabId, adapter.applyEntrySelectors ?? [])
       if (clicked) {
@@ -475,6 +568,27 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
             .join(', ')}); letting the site decide`,
           'warn'
         )
+      }
+
+      // --- stop early on questions nobody may answer -------------------------
+      //
+      // A mandatory work-authorization, sponsorship or credential question that
+      // survived every tier will still be unanswered on the last page -- the
+      // gate parks it there whatever happens in between. Advancing through the
+      // remaining pages first only burns model calls and minutes to arrive at
+      // the same verdict, so name it now and go straight to the gate.
+      const offLimitsRequired = resolved.unresolved.filter((f) => f.required && isOffLimitsQuestion(f))
+      if (offLimitsRequired.length > 0) {
+        await applicationsRepo.addTimeline(
+          application.id,
+          'wizard',
+          `stopping early: ${offLimitsRequired.length} mandatory question(s) cannot be answered honestly (${offLimitsRequired
+            .slice(0, 3)
+            .map((f) => f.label || f.selector)
+            .join(', ')}); parking for review`,
+          'warn'
+        )
+        break
       }
 
       // --- advance a wizard, or stop ---------------------------------------

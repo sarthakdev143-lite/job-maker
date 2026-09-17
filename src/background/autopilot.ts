@@ -80,9 +80,10 @@ export async function startAutopilot(): Promise<AutopilotResult> {
 
   // --- drop sources it cannot submit through --------------------------------
   //
-  // Job-board adverts on Naukri and Indeed are login-gated, so leaving them on
-  // fills the queue with postings that get scored, cost model time, and are then
-  // skipped at apply time.
+  // Naukri's adverts are login-gated, so leaving them on fills the queue with
+  // postings that get scored, cost model time, and are then skipped at apply
+  // time. (Indeed stays: its Easy Apply wizard is driven directly, and
+  // redirect listings resolve to the company ATS at apply time.)
   const removed: string[] = []
   const recipes = await getRecipes()
   const hasApplyable = recipes.some((r) => r.enabled && APPLYABLE_SOURCES.has(r.source))
@@ -143,6 +144,14 @@ export async function startAutopilot(): Promise<AutopilotResult> {
       // profile -- it is just not rewritten per posting.
       tailorResume: false,
       generateCoverLetter: false,
+    },
+    llm: {
+      ...settings.llm,
+      // Chrome throttles timers in minimized windows hard enough to starve both
+      // Cloudflare's challenge script and DeepSeek's own reply stream -- the
+      // two failures that look like "blocked" and "model timeout" at 3am. An
+      // unfocused visible window costs nothing overnight and removes both.
+      keepWindowMinimized: false,
     },
     enabledSites: {
       ...settings.enabledSites,

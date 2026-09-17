@@ -12,7 +12,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest'
-import { STALE_AFTER_MS, beat, clearRunState, loadRunState, looksInterrupted, saveRunState } from '@/background/run-state'
+import { STALE_AFTER_MS, beat, clearRunState, loadBreakerCount, loadRunState, looksInterrupted, saveBreakerCount, saveRunState } from '@/background/run-state'
 
 /** A minimal chrome.storage.local that behaves like the real one. */
 function installFakeStorage(): { store: Record<string, unknown>; failNext: () => void } {
@@ -130,6 +130,24 @@ describe('run state', () => {
     expect(state.running).toBe(true)
     expect(state.startedAt).toBeNull()
     expect(state.lastBeatAt).toBe(0)
+  })
+})
+
+describe('breaker count', () => {
+  beforeEach(() => {
+    installFakeStorage()
+  })
+
+  it('starts at zero and round-trips', async () => {
+    expect(await loadBreakerCount()).toBe(0)
+    await saveBreakerCount(2)
+    expect(await loadBreakerCount()).toBe(2)
+  })
+
+  it('ignores a malformed stored value', async () => {
+    const fakeStorage = installFakeStorage()
+    fakeStorage.store['agent:breakerFailures'] = 'lots'
+    expect(await loadBreakerCount()).toBe(0)
   })
 })
 

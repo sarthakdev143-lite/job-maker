@@ -22,6 +22,7 @@ import { guessAnswer } from './guess'
 import { adapterById } from '@/sites/registry'
 import { lookup as bankLookup, promptDigest, remember, touch } from '@/storage/answer-bank'
 import { llm } from '@/llm/broker'
+import { LlmError } from '@/llm/driver'
 import { FieldAnswersResponseSchema, type FieldDescriptor, type FilledField, type Job, type Profile, type Settings } from '@/storage/schemas'
 import { condenseDescription, renderTemplate } from '@/shared/text'
 import { createLogger } from '@/shared/logger'
@@ -181,7 +182,12 @@ export async function resolveFields(ctx: ResolveContext): Promise<ResolveResult>
         }
       }
     } catch (e) {
-      log.warn(`Model could not answer ${needsModel.length} field(s); parking them`, {
+      // Name the failure mode, not just the count: a login expiry or a
+      // throttled worker window parks every later form's novel fields, and the
+      // morning log must say "model down" rather than "bad form" for all of
+      // them. The code survives the message boundary; anything else is detail.
+      const code = e instanceof LlmError ? ` [${e.code}]` : ''
+      log.warn(`Model could not answer ${needsModel.length} field(s)${code}; parking them`, {
         error: (e as Error).message,
       })
       unresolved.push(...needsModel)

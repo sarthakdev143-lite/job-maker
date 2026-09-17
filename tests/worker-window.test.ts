@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { openWorkerWindow } from '@/shared/windows'
+import { closeWorkerWindow, isOwnedWindow, openWorkerWindow, rememberOwnedWindow } from '@/shared/windows'
 
 type CreateArgs = Record<string, unknown>
 
@@ -27,6 +27,12 @@ function installFakeChrome(): void {
   createImpl = async (args) => ({ id: 7, tabs: [{ id: 42 }], state: args.state })
 
   ;(globalThis as unknown as { chrome: unknown }).chrome = {
+    storage: {
+      session: {
+        get: async () => ({}),
+        set: async () => undefined,
+      },
+    },
     windows: {
       create: vi.fn(async (args: CreateArgs) => {
         createCalls.push(args)
@@ -109,5 +115,20 @@ describe('openWorkerWindow', () => {
     await expect(openWorkerWindow('https://example.com', { minimized: true })).rejects.toThrow(
       /could not open/i
     )
+  })
+
+  it('records ownership before returning, so an eviction cannot orphan the window', async () => {
+    await openWorkerWindow('https://example.com', { minimized: true })
+    expect(isOwnedWindow(7)).toBe(true)
+  })
+
+  it('closes adopted windows once they are remembered, and refuses the rest', async () => {
+    const windows = (globalThis as unknown as { chrome: { windows: { remove: ReturnType<typeof vi.fn> } } })
+      .chrome.windows
+    await rememberOwnedWindow(9)
+    await closeWorkerWindow(9)
+    expect(windows.remove).toHaveBeenCalledWith(9)
+    await closeWorkerWindow(12345)
+    expect(windows.remove).not.toHaveBeenCalledWith(12345)
   })
 })

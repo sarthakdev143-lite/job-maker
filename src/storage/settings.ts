@@ -16,6 +16,7 @@ import {
   type Settings,
 } from './schemas'
 import { DEFAULT_PROMPTS, seedRecipes } from './defaults'
+import { getRecentSummaries, getRecipeHealth } from '@/background/run-history'
 
 const KEYS = {
   settings: 'settings',
@@ -168,8 +169,18 @@ export async function writePersistedAgentState<T>(state: T): Promise<void> {
 /* ------------------------------------------------------------ import/export */
 
 export async function exportAll(): Promise<string> {
-  const [settings, profile, recipes] = await Promise.all([getSettings(), getProfile(), getRecipes()])
-  return JSON.stringify({ version: 1, exportedAt: Date.now(), settings, profile, recipes }, null, 2)
+  const [settings, profile, recipes, recentRuns, recipeHealth] = await Promise.all([
+    getSettings(),
+    getProfile(),
+    getRecipes(),
+    getRecentSummaries(20),
+    getRecipeHealth(),
+  ])
+  return JSON.stringify(
+    { version: 1, exportedAt: Date.now(), settings, profile, recipes, recentRuns, recipeHealth },
+    null,
+    2
+  )
 }
 
 export async function importAll(payload: string): Promise<{ settings: boolean; profile: boolean; recipes: boolean }> {

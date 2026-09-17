@@ -364,7 +364,8 @@ export async function fetchIndeed(recipe: SearchRecipe, options: IndeedUrlOption
         title: card.title,
         location: card.location || 'Remote',
         descriptionText: card.snippet,
-        postedAt: null, // relative text; parsed by the caller via parsePostedDate
+        postedAt: null, // parsed from the card's relative date by makeJob
+        postedText: card.postedText,
         salaryText: card.salaryText,
         recipeId: recipe.id,
       })
@@ -436,7 +437,9 @@ export async function fetchIndeed(recipe: SearchRecipe, options: IndeedUrlOption
       log.info(`Indeed: ${cards.length} card(s) from ${host}`)
       collect(cards)
     } catch (e) {
-      log.debug(`Indeed search failed for ${host}`, { error: (e as Error).message })
+      // Warn, not debug: a failed search page is a whole domain yielding
+      // nothing, and a night of these used to read as "no remote jobs today".
+      log.warn(`Indeed search failed for ${host}`, { error: (e as Error).message })
     } finally {
       await closeWorkerWindow(windowId)
       if (retryWindowId !== null) {
@@ -527,7 +530,10 @@ export async function hydrateIndeedJobs(jobs: Job[], limit = 40): Promise<Job[]>
       })
 
       if (!detail) continue
-      if (detail.description.length > job.descriptionText.length) job.descriptionText = detail.description
+      if (detail.description.length > job.descriptionText.length) {
+        job.descriptionText = detail.description
+        job.descriptionSource = 'hydrated'
+      }
       if (!job.company && detail.company) job.company = detail.company
       job.easyApply = detail.easyApply
 

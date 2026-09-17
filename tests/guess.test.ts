@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { guessAnswer } from '@/form/guess'
+import { guessAnswer, isOffLimitsQuestion } from '@/form/guess'
 import { FieldDescriptorSchema, JobSchema, ProfileSchema, type FieldDescriptor } from '@/storage/schemas'
 
 const profile = ProfileSchema.parse({
@@ -168,5 +168,20 @@ describe('guessAnswer', () => {
 
   it('gives back nothing for an identifier it cannot know', () => {
     expect(guessAnswer(field({ label: 'Employee referral code', kind: 'text' }), profile, job)).toBeNull()
+  })
+})
+
+describe('isOffLimitsQuestion', () => {
+  it('flags sponsorship and credential questions for the early exit', () => {
+    expect(
+      isOffLimitsQuestion(field({ label: 'Will you require sponsorship now or in the future?' }))
+    ).toBe(true)
+    expect(isOffLimitsQuestion(field({ label: 'US citizen or authorized to work?' }))).toBe(true)
+    expect(isOffLimitsQuestion(field({ label: 'Professional licence number' }))).toBe(true)
+  })
+
+  it('leaves ordinary questions alone', () => {
+    expect(isOffLimitsQuestion(field({ label: 'How many years of experience with Go?' }))).toBe(false)
+    expect(isOffLimitsQuestion(field({ label: 'Preferred work location' }))).toBe(false)
   })
 })

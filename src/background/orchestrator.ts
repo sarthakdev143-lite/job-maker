@@ -23,7 +23,14 @@ import { createLogger } from '@/shared/logger'
 import { dayKey, errorMessage, jitter } from '@/shared/util'
 import { durableSleep, startHeartbeat, type Heartbeat } from '@/shared/keepalive'
 import { closeAllWorkerWindows } from '@/shared/windows'
-import { beat, clearRunState, loadRunState, looksInterrupted, saveRunState } from './run-state'
+import { beat, clearRunState, loadBreakerCount, loadRunState, looksInterrupted, saveBreakerCount, saveRunState } from './run-state'
+import {
+  emptySummary,
+  saveCycleSummary,
+  summarizeCycle,
+  type CycleOutcome,
+  type CycleSummary,
+} from './run-history'
 import type { AgentState } from '@/shared/messages'
 import { activity, idleStep } from '@/shared/activity'
 import type { Autonomy, Job, Settings } from '@/storage/schemas'
@@ -38,6 +45,19 @@ const log = createLogger('agent')
  * reason it paused has passed.
  */
 const IDLE_CYCLE_GAP_MS = 60_000
+
+/** An application left in `running` longer than this died with its worker. */
+const STALE_RUNNING_MS = 10 * 60_000
+
+/**
+ * How one application attempt ended, for the cycle funnel.
+ *
+ * `parked` means the gate held it for review (or the submit went unconfirmed);
+ * `skipped` means the runner never had a form to fill (no form, vendor off);
+ * `stopped` means the run itself halted (cap, hours, breaker, stop button) and
+ * carries no funnel count.
+ */
+type ApplyAttempt = 'submitted' | 'parked' | 'skipped' | 'failed' | 'stopped'
 
 type StateListener = (state: AgentState) => void
 
@@ -289,6 +309,7 @@ class Orchestrator {
     this.stopRequested = false
     this.manualRun = true
     this.consecutiveFailures = 0
+    await saveBreakerCount(0)
     const startedAt = Date.now()
     this.patch({ running: true, phase: 'idle', lastError: '', startedAt })
     await saveRunState({ running: true, startedAt, manual: true })
@@ -303,6 +324,7 @@ class Orchestrator {
   async stop(): Promise<AgentState> {
     this.stopRequested = true
     this.loopActive = false
+    await saveBreakerCount(0)
     this.patch({ phase: 'stopped' })
     activity.begin('stopped', 'Stopping after the current step')
     log.info('Stop requested')
@@ -401,7 +423,10 @@ class Orchestrator {
 
     this.stopRequested = false
     this.manualRun = persisted.manual
-    this.consecutiveFailures = 0
+    // Restored, not reset: the count survived in storage precisely so a site
+    // failing across evictions still trips the breaker instead of getting a
+    // fresh three strikes every thirty seconds.
+    this.consecutiveFailures = await loadBreakerCount()
     this.patch({ running: true, phase: 'idle', lastError: '', startedAt: persisted.startedAt ?? Date.now() })
     await saveRunState({ running: true, startedAt: persisted.startedAt, manual: persisted.manual })
     this.beginHeartbeat()
@@ -423,7 +448,16 @@ class Orchestrator {
   private async runForever(): Promise<void> {
     try {
       while (!this.stopRequested && this.state.running) {
-        await this.runCycle()
+        try {
+          await this.runCycle()
+        } catch (e) {
+          // One bad cycle must never end the night. The cycle itself catches
+          // nearly everything, so reaching here means something unexpected
+          // escaped -- log it loudly and keep sweeping.
+          const message = errorMessage(e)
+          this.patch({ phase: 'error', lastError: message })
+          log.error(`Run loop survived a cycle failure: ${message}`)
+        }
         if (this.stopRequested || !this.state.running) break
         await durableSleep(IDLE_CYCLE_GAP_MS, { shouldStop: this.shouldStop })
       }
@@ -441,8 +475,12 @@ class Orchestrator {
    * the active-hours window even if the run was originally started by hand.
    */
   async runCycleNow(options: { manual?: boolean } = {}): Promise<void> {
-    this.manualRun = options.manual ?? false
     if (this.cycleInFlight) return this.cycleInFlight
+    // Assigned only when no loop owns this run: the alarm fires every five
+    // minutes while a hand-started run is in flight, and flipping manualRun to
+    // false on each tick silently converted an 11pm manual run into a scheduled
+    // one that then paused itself at the window edge.
+    if (!this.loopActive) this.manualRun = options.manual ?? false
     return this.runCycle()
   }
 
@@ -460,7 +498,13 @@ class Orchestrator {
     // A run that finds nothing is a normal outcome, and it has to leave a trace
     // in the UI. Clearing the status line at the end of every cycle is what made
     // a working agent look like a frozen one.
-    const tally = { found: 0, scored: 0, queued: 0, applied: 0, bestScore: 0 }
+    const startedAt = Date.now()
+    const tally = {
+      ...emptySummary(),
+      perRecipe: {} as CycleSummary['perRecipe'],
+      gateReasons: {} as CycleSummary['gateReasons'],
+    }
+    let stoppedEarly = false
 
     try {
       await pruneCounters(dayKey())
@@ -471,6 +515,7 @@ class Orchestrator {
         this.patch({ phase: 'paused' })
         activity.begin('paused', `Waiting for active hours - next run ${when}`)
         log.info(`Outside active hours; the next scheduled run is ${when}. Press Start to run now anyway.`)
+        await this.persistCycle(tally, startedAt, 'paused-hours')
         return
       }
 
@@ -479,10 +524,18 @@ class Orchestrator {
       activity.begin('discovering', 'Searching job boards', 120_000)
       const discovery = await runDiscovery({ shouldStop: this.shouldStop })
       tally.found = discovery.stored
+      tally.duplicates = discovery.duplicates
+      tally.rejected = discovery.rejected
+      tally.blocked = discovery.blocked
+      tally.perRecipe = discovery.byRecipe
       log.info(
-        `Discovery: ${discovery.stored} new, ${discovery.duplicates} duplicate, ${discovery.rejected} filtered out`
+        `Discovery: ${discovery.stored} new, ${discovery.duplicates} duplicate, ${discovery.rejected} filtered out` +
+          (discovery.blocked > 0 ? `, ${discovery.blocked} recipe(s) blocked` : '')
       )
-      if (this.shouldStop()) return
+      if (this.shouldStop()) {
+        stoppedEarly = true
+        return
+      }
 
       // --- score, and apply the moment something qualifies ----------------
       //
@@ -529,6 +582,7 @@ class Orchestrator {
             try {
               score = await scoreJob(job, profile, settings)
             } catch (e) {
+              tally.scoreFailed++
               log.warn(`Could not score ${job.title} at ${job.company}: ${errorMessage(e)}`, undefined, job.id)
               continue // left as 'new', so the next cycle retries it
             }
@@ -559,16 +613,23 @@ class Orchestrator {
 
           const updated = await jobsRepo.get(job.id)
           if (updated) {
-            const carryOn = await this.applyOne(updated, settings)
-            if (carryOn) tally.applied++
-            else return
+            const result = await this.applyOne(updated, settings)
+            this.countApplyResult(tally, result.result, result.gateReasons)
+            if (!result.carryOn) {
+              stoppedEarly = true
+              return
+            }
           }
         }
       }
-      if (this.shouldStop()) return
+      if (this.shouldStop()) {
+        stoppedEarly = true
+        return
+      }
 
       // --- anything queued by an earlier cycle -----------------------------
-      await this.applyQueue()
+      const queueResults = await this.applyQueue()
+      for (const r of queueResults) this.countApplyResult(tally, r.result, r.gateReasons)
     } catch (e) {
       const message = errorMessage(e)
       this.patch({ phase: 'error', lastError: message })
@@ -576,34 +637,88 @@ class Orchestrator {
     } finally {
       await logsRepo.trim()
       await this.refreshCounts()
+      await this.persistCycle(tally, startedAt, stoppedEarly ? 'stopped' : this.outcomeFromPhase())
       // 'paused' and 'error' both carry the explanation for why a cycle stopped
       // early. Resetting them here is what made a stalled agent look idle with
-      // no reason given.
+      // no reason given. The status line itself is ended by persistCycle, which
+      // writes the same note it persists.
       const explained = this.state.phase === 'error' || this.state.phase === 'paused'
       if (this.state.running && !explained) {
         this.patch({ phase: 'idle', currentJobId: '' })
-        activity.end(summarize(tally))
       }
     }
   }
 
-  /**
-   * Apply to one job, with every reason to stop the whole run checked first.
+  /** Fold one application attempt into the cycle funnel. */
+  private countApplyResult(
+    tally: Omit<CycleSummary, 'id' | 'startedAt' | 'endedAt' | 'outcome' | 'note'>,
+    result: ApplyAttempt,
+    gateReasons: string[]
+  ): void {
+    if (result === 'submitted') tally.submitted++
+    else if (result === 'parked') tally.parked++
+    else if (result === 'skipped') tally.skipped++
+    else if (result === 'failed') tally.failed++
+    if (result === 'submitted' || result === 'parked' || result === 'skipped' || result === 'failed') {
+      tally.attempted++
+    }
+    for (const reason of gateReasons) {
+      tally.gateReasons[reason] = (tally.gateReasons[reason] ?? 0) + 1
+    }
+  }
+
+  /** Name how this cycle ended, for the persisted run record. */
+  private outcomeFromPhase(): CycleOutcome {
+    if (this.state.phase === 'paused') return 'paused-cap'
+    if (this.state.phase === 'error') {
+      return /in a row|circuit/i.test(this.state.lastError) ? 'error-circuit' : 'error'
+    }
+    return 'completed'
+  }
+
+  /** Write the funnel to storage so the morning after has one screen to read. */
+  private async persistCycle(
+    tally: Omit<CycleSummary, 'id' | 'startedAt' | 'endedAt' | 'outcome' | 'note'>,
+    startedAt: number,
+    outcome: CycleOutcome
+  ): Promise<void> {
+    const note = summarizeCycle({ ...tally, outcome, note: '' })
+    await saveCycleSummary({ ...tally, startedAt, endedAt: Date.now(), outcome, note })
+    // The live status line still uses the legacy one-line shape.
+    if (this.state.running && this.state.phase !== 'error' && this.state.phase !== 'paused') {
+      activity.end(note)
+    }
+  }
+
+  /** Apply to one job, with every reason to stop the whole run checked first.
    *
    * Returns false when the run should end -- a cap reached, the window closed,
    * the circuit breaker tripped -- so both callers can stop cleanly rather than
    * each reimplementing the same guards.
    */
-  private async applyOne(job: Job, settings: Settings): Promise<boolean> {
-    if (this.shouldStop()) return false
+  private async applyOne(
+    job: Job,
+    settings: Settings
+  ): Promise<{ carryOn: boolean; result: ApplyAttempt; gateReasons: string[] }> {
+    if (this.shouldStop()) return { carryOn: false, result: 'stopped', gateReasons: [] }
 
     // A job parked for review stays queued so the user can still see it, but
     // re-running it every cycle would redo the model work and re-park it for
     // ever. Only untouched jobs and genuinely queued ones are applied to.
     const existing = await applicationsRepo.byJob(job.id)
     if (existing && existing.status !== 'queued') {
-      log.debug(`Skipping ${job.title}: application already ${existing.status}`, undefined, job.id)
-      return true
+      // ...unless the worker died mid-application. Eviction runs before the
+      // machine's `finally`, so the record is stuck at `running` while its job
+      // sits `queued`: retried every cycle, skipped every time, for ever.
+      // Reclaim it once the beat is old enough that no live attempt can own it.
+      if (existing.status === 'running' && Date.now() - existing.updatedAt > STALE_RUNNING_MS) {
+        log.warn(`Reclaiming ${job.title}: application stuck in 'running'; requeueing`, undefined, job.id)
+        await applicationsRepo.update(existing.id, { status: 'queued' })
+        await applicationsRepo.addTimeline(existing.id, 'reclaim', 'worker died mid-application; retrying', 'warn')
+      } else {
+        log.debug(`Skipping ${job.title}: application already ${existing.status}`, undefined, job.id)
+        return { carryOn: true, result: 'skipped', gateReasons: [`already ${existing.status}`] }
+      }
     }
 
     const appliedToday = await getCounter(dailyCounterKey())
@@ -611,19 +726,21 @@ class Orchestrator {
       log.info(`Daily cap reached (${appliedToday}/${settings.autonomy.maxApplicationsPerDay}); pausing`)
       this.patch({ phase: 'paused' })
       activity.begin('paused', `Daily cap reached (${appliedToday} sent today)`)
-      return false
+      return { carryOn: false, result: 'stopped', gateReasons: [] }
     }
 
     if (!this.manualRun && !withinActiveWindow(settings.autonomy)) {
       log.info('Active hours ended mid-run; pausing')
       this.patch({ phase: 'paused' })
       activity.begin('paused', 'Active hours ended')
-      return false
+      return { carryOn: false, result: 'stopped', gateReasons: [] }
     }
 
     this.patch({ phase: 'applying', currentJobId: job.id })
     activity.begin('applying', `Applying: ${job.title} at ${job.company}`, 180_000)
 
+    let result: ApplyAttempt = 'failed'
+    let gateReasons: string[] = []
     try {
       const outcome = await applyToJob(job.id, {
         shouldStop: this.shouldStop,
@@ -633,22 +750,39 @@ class Orchestrator {
         onStep: () => this.patch({ currentJobId: job.id }),
       })
 
+      if (outcome.submitted) {
+        result = 'submitted'
+      } else if (outcome.decision.action === 'review') {
+        result = 'parked'
+        gateReasons = outcome.decision.reasons
+      } else {
+        result = 'skipped'
+        gateReasons = outcome.decision.reasons
+      }
+      if (outcome.application.status === 'failed') result = 'failed'
+
       this.consecutiveFailures = outcome.application.status === 'failed' ? this.consecutiveFailures + 1 : 0
+      await saveBreakerCount(this.consecutiveFailures)
 
       if (this.consecutiveFailures >= settings.autonomy.circuitBreakerFailures) {
         const message = `Stopping: ${this.consecutiveFailures} applications failed in a row`
         log.error(message)
         this.patch({ phase: 'error', lastError: message, running: false })
         this.stopRequested = true
-        return false
+        // The trip is deliberate: clear the persisted flag so the next wake
+        // does not resurrect the run it just killed. The cycle summary already
+        // recorded the outcome for the morning after.
+        await clearRunState()
+        return { carryOn: false, result, gateReasons }
       }
     } catch (e) {
       this.consecutiveFailures++
+      await saveBreakerCount(this.consecutiveFailures)
       log.error(`Unexpected failure on ${job.title}`, { error: errorMessage(e) }, job.id)
     }
 
     await this.refreshCounts()
-    if (this.shouldStop()) return false
+    if (this.shouldStop()) return { carryOn: false, result, gateReasons }
 
     // Chunked rather than one long sleep: a plain setTimeout of up to three
     // minutes is exactly the idle stretch Chrome evicts the worker during, and
@@ -658,21 +792,24 @@ class Orchestrator {
       settings.autonomy.delayBetweenApplicationsMs.max
     )
     await durableSleep(gap, { shouldStop: this.shouldStop })
-    return true
+    return { carryOn: true, result, gateReasons }
   }
 
-  private async applyQueue(): Promise<void> {
+  private async applyQueue(): Promise<Array<{ result: ApplyAttempt; gateReasons: string[] }>> {
     const settings = await getSettings()
     const queued = (await jobsRepo.byStatus('queued', 100)).sort(byCheapestFirst)
-    if (queued.length === 0) return
+    if (queued.length === 0) return []
 
     this.patch({ phase: 'applying' })
     activity.begin('applying', `${queued.length} job(s) queued`, 180_000)
 
+    const results: Array<{ result: ApplyAttempt; gateReasons: string[] }> = []
     for (const job of queued) {
-      const carryOn = await this.applyOne(job, settings)
-      if (!carryOn) return
+      const one = await this.applyOne(job, settings)
+      results.push({ result: one.result, gateReasons: one.gateReasons })
+      if (!one.carryOn) return results
     }
+    return results
   }
 }
 
@@ -701,30 +838,4 @@ export function describeNextWindow(autonomy: Autonomy, from: Date = new Date()):
     return `${label} at ${String(start).padStart(2, '0')}:00`
   }
   return 'never - no active days are selected'
-}
-
-/**
- * What a finished cycle actually accomplished, in one line.
- *
- * Written to say something useful even when the answer is "nothing", because
- * "nothing, and here is the first thing to change" is a status and a blank line
- * is not.
- */
-function summarize(tally: {
-  found: number
-  scored: number
-  queued: number
-  applied: number
-  bestScore: number
-}): string {
-  const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (tally.found === 0 && tally.scored === 0) {
-    return `last run ${at}: no new postings found - widen your searches or filters`
-  }
-  if (tally.queued === 0 && tally.scored > 0) {
-    // Naming the best score turns "nothing matched" into a number the user can
-    // act on: either the threshold is too high or the searches are wrong.
-    return `last run ${at}: scored ${tally.scored}, best was ${tally.bestScore} - lower your match threshold or fix the searches`
-  }
-  return `last run ${at}: ${tally.found} found, ${tally.scored} scored, ${tally.queued} queued, ${tally.applied} attempted`
 }

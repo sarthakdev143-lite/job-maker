@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { sendToWorker } from '@/shared/messages'
 import { BUILD_ID } from '@/shared/build'
 import type { PreflightCheck } from '@/background/orchestrator'
+import type { CycleSummary, RecipeHealth } from '@/background/run-history'
 import type { SetupResult } from '@/discovery/setup'
 import type { AutopilotResult } from '@/background/autopilot'
 import type { AgentState, BroadcastEvent, UiRequest } from '@/shared/messages'
@@ -62,6 +63,9 @@ export const api = {
     sendToWorker<AnswerBankEntry | null>({ type: 'ui:saveAnswer', label, value, pinned }),
   deleteAnswer: (id: string) => sendToWorker<unknown>({ type: 'ui:deleteAnswer', id }),
   listLogs: (limit?: number) => sendToWorker<LogEvent[]>({ type: 'ui:listLogs', limit }),
+  getLastRun: () => sendToWorker<CycleSummary | null>({ type: 'ui:getLastRun' }),
+  getRunHistory: (limit?: number) => sendToWorker<CycleSummary[]>({ type: 'ui:getRunHistory', limit }),
+  getRecipeHealth: () => sendToWorker<Record<string, RecipeHealth>>({ type: 'ui:getRecipeHealth' }),
   clearLogs: () => sendToWorker<unknown>({ type: 'ui:clearLogs' }),
   stats: () => sendToWorker<Stats>({ type: 'ui:stats' }),
   exportData: () => sendToWorker<{ payload: string }>({ type: 'ui:exportData' }),

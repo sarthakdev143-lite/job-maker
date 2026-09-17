@@ -55,6 +55,9 @@ export type UiRequest =
   | { type: 'ui:saveAnswer'; id?: string; label: string; value: string; pinned?: boolean }
   | { type: 'ui:deleteAnswer'; id: string }
   | { type: 'ui:listLogs'; limit?: number }
+  | { type: 'ui:getLastRun' }
+  | { type: 'ui:getRunHistory'; limit?: number }
+  | { type: 'ui:getRecipeHealth' }
   | { type: 'ui:clearLogs' }
   | { type: 'ui:stats' }
   | { type: 'ui:exportData' }

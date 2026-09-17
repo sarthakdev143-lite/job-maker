@@ -16,6 +16,7 @@ import { fetchIndeed, hydrateIndeedJobs } from './sources/indeed'
 import { enrichJob, prefilter } from '@/matching/prefilter'
 import { jobsRepo } from '@/storage/db'
 import { getRecipes, getSettings, saveRecipe } from '@/storage/settings'
+import { recordRecipeHealth } from '@/background/run-history'
 import { parsePostedDate } from '@/shared/text'
 import { createLogger } from '@/shared/logger'
 import { activity } from '@/shared/activity'
@@ -29,6 +30,8 @@ export type DiscoveryResult = {
   duplicates: number
   rejected: number
   stored: number
+  /** Recipes that threw (e.g. Indeed asking for human verification). */
+  blocked: number
   byRecipe: Record<string, { fetched: number; stored: number; error?: string }>
 }
 
@@ -61,7 +64,7 @@ export async function runDiscovery(
     (r) => (options.recipeId ? r.id === options.recipeId : r.enabled)
   )
 
-  const result: DiscoveryResult = { fetched: 0, duplicates: 0, rejected: 0, stored: 0, byRecipe: {} }
+  const result: DiscoveryResult = { fetched: 0, duplicates: 0, rejected: 0, stored: 0, blocked: 0, byRecipe: {} }
   if (recipes.length === 0) {
     log.info('No enabled search recipes; nothing to discover')
     return result
@@ -83,18 +86,30 @@ export async function runDiscovery(
       entry.fetched = jobs.length
       result.fetched += jobs.length
 
-      // Scraped sources give relative dates as text; convert before filtering.
-      jobs = jobs.map((j) => (j.postedAt ? j : { ...j, postedAt: parsePostedDate(j.salaryText) }))
+      // Scraped sources carry relative dates as text; the sources parse what
+      // they can into postedAt, and this is only a safety net for anything
+      // that arrived without one.
+      jobs = jobs.map((j) => (j.postedAt ? j : { ...j, postedAt: parsePostedDate(j.descriptionText) }))
 
       // Only hydrate what could plausibly survive; fetching descriptions is the
       // slow part and there is no point paying it for a blocklisted company.
       const plausible = jobs.filter((j) => prefilter(j, settings.matchRules).pass || j.descriptionText.length < 400)
-      if (recipe.source === 'indeed' || recipe.source === 'custom') {
-        // The Indeed hydrator also resolves each listing's real apply target,
-        // which is what lets the runner open a company ATS form directly
-        // instead of landing on an advert and giving up.
-        await hydrateIndeedJobs(plausible, Math.min(40, recipe.maxResultsPerRun))
-      } else if (recipe.source === 'naukri') {
+
+      // Hydration opens a window per job, which is by far the most expensive
+      // thing discovery does -- forty of them is roughly five minutes before a
+      // single application is attempted, every cycle.
+      //
+      // Its two products are a full description (for the model to score and to
+      // answer open questions with) and the real apply URL. In volume mode the
+      // scorer is switched off entirely, and the apply machine backfills the
+      // description, the Easy Apply flag and the off-Indeed apply link from the
+      // advert tab it opens anyway (see readAdvertDetails) -- so paying five
+      // minutes up front buys nothing but delay. The prefilter defers
+      // "must mention" keyword rules on snippets for the same reason.
+      const hydrateLimit = settings.autonomy.volumeMode ? 0 : 40
+      if (hydrateLimit > 0 && (recipe.source === 'indeed' || recipe.source === 'custom')) {
+        await hydrateIndeedJobs(plausible, Math.min(hydrateLimit, recipe.maxResultsPerRun))
+      } else if (hydrateLimit > 0 && recipe.source === 'naukri') {
         await hydrateDescriptions(plausible, Math.min(12, recipe.maxResultsPerRun))
       }
 
@@ -121,10 +136,18 @@ export async function runDiscovery(
       }
 
       await saveRecipe({ ...recipe, lastRunAt: Date.now() })
+      await recordRecipeHealth(recipe.id, {
+        lastRunAt: Date.now(),
+        lastFetched: entry.fetched,
+        lastStored: entry.stored,
+        lastError: '',
+      })
       log.info(`Recipe "${recipe.name}": ${entry.stored} new, ${result.duplicates} dupes, ${result.rejected} filtered out`)
     } catch (e) {
       entry.error = errorMessage(e)
-      log.error(`Recipe "${recipe.name}" failed`, { error: entry.error })
+      result.blocked++
+      log.warn(`Recipe "${recipe.name}" blocked: ${entry.error}`)
+      await recordRecipeHealth(recipe.id, { lastRunAt: Date.now(), lastError: entry.error })
     }
   }
 

@@ -127,6 +127,7 @@ export async function fetchNaukri(recipe: SearchRecipe): Promise<Job[]> {
             location: card.location,
             descriptionText: card.snippet,
             postedAt: null,
+            postedText: card.postedText,
             salaryText: card.salaryText,
             recipeId: recipe.id,
           })
@@ -201,7 +202,10 @@ export async function hydrateDescriptions(jobs: Job[], limit = 12): Promise<Job[
         }
         return (document.body?.innerText ?? '').slice(0, 20000)
       })
-      if (body && body.length > job.descriptionText.length) job.descriptionText = body
+      if (body && body.length > job.descriptionText.length) {
+        job.descriptionText = body
+        job.descriptionSource = 'hydrated'
+      }
     } catch (e) {
       log.debug(`Could not hydrate ${job.url}`, { error: (e as Error).message })
     } finally {

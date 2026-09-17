@@ -47,7 +47,13 @@ export function prefilter(job: Job, rules: MatchRules): PrefilterVerdict {
   const excludedBody = anyMatch(description, rules.descriptionExcludes)
   if (excludedBody) return { pass: false, reason: `description contains "${excludedBody}"` }
 
-  if (rules.descriptionIncludes.length > 0 && !anyMatch(description, rules.descriptionIncludes)) {
+  // A listing-card snippet is not the posting: judging "must mention" keywords
+  // against one line of teaser text rejects nearly everything, including roles
+  // that mention every keyword in the full description. Defer the check -- the
+  // description is backfilled from the live apply page before any question is
+  // answered, so nothing is submitted on the basis of the snippet.
+  const isThinSnippet = job.descriptionSource === 'snippet' && description.length < 400
+  if (!isThinSnippet && rules.descriptionIncludes.length > 0 && !anyMatch(description, rules.descriptionIncludes)) {
     return { pass: false, reason: 'description matches none of the required keywords' }
   }
 

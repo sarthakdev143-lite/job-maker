@@ -42,7 +42,7 @@ export async function openWorkerWindow(url: string, options: OpenOptions = {}): 
       }
 
   try {
-    return unpack(await chrome.windows.create(args))
+    return await unpack(await chrome.windows.create(args))
   } catch (e) {
     if (!minimized) throw e
 
@@ -50,19 +50,27 @@ export async function openWorkerWindow(url: string, options: OpenOptions = {}): 
     // Creating a plain unfocused window and minimizing it immediately gets to
     // the same place, at the cost of a brief flicker.
     log.debug(`Minimized window creation refused (${(e as Error).message}); retrying plainly`)
-    const created = unpack(await chrome.windows.create({ url, focused: false, type: 'normal' }))
+    const created = await unpack(await chrome.windows.create({ url, focused: false, type: 'normal' }))
     await chrome.windows.update(created.windowId, { state: 'minimized' }).catch(() => {})
     return created
   }
 }
 
-function unpack(win: chrome.windows.Window | undefined): WorkerWindow {
+async function unpack(win: chrome.windows.Window | undefined): Promise<WorkerWindow> {
   const tabId = win?.tabs?.[0]?.id
   if (win?.id === undefined || tabId === undefined) {
     throw new Error('Could not open a background window. Chrome refused the request.')
   }
-  void remember(win.id)
+  // Awaited on purpose: an eviction between `windows.create` resolving and the
+  // ownership write left a minimized window nobody owned and nobody reaped --
+  // one invisible window per occurrence, all night long.
+  await remember(win.id)
   return { tabId, windowId: win.id }
+}
+
+/** Record an id the agent did not create but has taken over (adopted tab windows). */
+export async function rememberOwnedWindow(windowId: number): Promise<void> {
+  await remember(windowId)
 }
 
 /**

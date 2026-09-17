@@ -8,7 +8,7 @@
  * sources that give us no other option.
  */
 
-import { condenseDescription, detectWorkMode, parseSalary } from '@/shared/text'
+import { condenseDescription, detectWorkMode, parsePostedDate, parseSalary } from '@/shared/text'
 import { hashString, uid } from '@/shared/util'
 import type { Job, SearchRecipe } from '@/storage/schemas'
 import { createLogger } from '@/shared/logger'
@@ -44,11 +44,16 @@ export function makeJob(input: {
   location: string
   descriptionText: string
   postedAt: number | null
+  /** Relative date text from a listing card ("2 days ago"); parsed when postedAt is null. */
+  postedText?: string
   salaryText?: string
   recipeId: string
+  /** Full posting text arrives in the board JSON; scraped cards carry a snippet. */
+  descriptionSource?: 'snippet' | 'hydrated' | 'apply_page'
 }): Job {
   const description = condenseDescription(input.descriptionText, 12000)
   const salary = parseSalary(input.salaryText || description.slice(0, 1500))
+  const postedAt = input.postedAt ?? (input.postedText ? parsePostedDate(input.postedText) : null)
   return {
     id: uid('job'),
     source: input.source,
@@ -62,8 +67,9 @@ export function makeJob(input: {
     salaryText: input.salaryText ?? '',
     salaryMin: salary.min,
     salaryMax: salary.max,
-    postedAt: input.postedAt,
+    postedAt,
     descriptionText: description,
+    descriptionSource: input.descriptionSource ?? 'snippet',
     dedupeHash: dedupeHash(input.company, input.title, input.location),
     status: 'new',
     matchScore: null,
@@ -138,6 +144,7 @@ export async function fetchGreenhouse(recipe: SearchRecipe): Promise<Job[]> {
           descriptionText: description,
           postedAt: j.updated_at ? Date.parse(j.updated_at) : null,
           recipeId: recipe.id,
+          descriptionSource: 'hydrated',
         })
       )
     }
@@ -194,6 +201,7 @@ export async function fetchLever(recipe: SearchRecipe): Promise<Job[]> {
           descriptionText: description,
           postedAt: p.createdAt ?? null,
           recipeId: recipe.id,
+          descriptionSource: 'hydrated',
         })
       )
     }
@@ -240,6 +248,7 @@ export async function fetchAshby(recipe: SearchRecipe): Promise<Job[]> {
           postedAt: j.publishedAt ? Date.parse(j.publishedAt) : null,
           salaryText: j.compensation?.compensationTierSummary ?? '',
           recipeId: recipe.id,
+          descriptionSource: 'hydrated',
         })
       )
     }

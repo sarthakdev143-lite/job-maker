@@ -50,6 +50,19 @@ describe('prefilter', () => {
     expect(prefilter(job(), rules({ descriptionIncludes: ['kubernetes'] })).pass).toBe(false)
   })
 
+  it('defers must-mention keywords when only a card snippet is available', () => {
+    // Volume mode skips hydration, so the description is a one-line teaser.
+    // Judging required keywords against it would reject nearly everything;
+    // the check runs once the real description is backfilled at apply time.
+    const snippet = job({ descriptionText: 'Exciting fintech role, apply now', descriptionSource: 'snippet' })
+    expect(prefilter(snippet, rules({ descriptionIncludes: ['kubernetes'] })).pass).toBe(true)
+    const hydrated = job({
+      descriptionText: 'Exciting fintech role, apply now',
+      descriptionSource: 'hydrated',
+    })
+    expect(prefilter(hydrated, rules({ descriptionIncludes: ['kubernetes'] })).pass).toBe(false)
+  })
+
   it('rejects an excluded work mode', () => {
     const remote = enrichJob(job({ title: 'Remote Senior Engineer', descriptionText: 'Fully remote role' }))
     expect(prefilter(remote, rules({ workModes: ['onsite'] })).pass).toBe(false)

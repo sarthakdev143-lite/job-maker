@@ -34,6 +34,7 @@ import { blobToDataUrl, renderResumePdf } from '@/documents/pdf'
 import { mergeIntoProfile, parseResumeText, remainingGaps } from '@/documents/parse-resume'
 import { suggestRules } from '@/matching/suggest'
 import { createLogger, setLogBroadcaster } from '@/shared/logger'
+import { getLastSummary, getRecentSummaries, getRecipeHealth } from './run-history'
 import { err, ok, type BroadcastEvent, type UiRequest } from '@/shared/messages'
 import { errorMessage } from '@/shared/util'
 import { formAgentFiles } from '@/shared/injection'
@@ -230,6 +231,15 @@ async function route(msg: UiRequest): Promise<unknown> {
     case 'ui:listLogs':
       return logsRepo.recent(msg.limit ?? 300)
 
+    case 'ui:getLastRun':
+      return getLastSummary()
+
+    case 'ui:getRunHistory':
+      return getRecentSummaries(msg.limit ?? 5)
+
+    case 'ui:getRecipeHealth':
+      return getRecipeHealth()
+
     case 'ui:clearLogs': {
       await logsRepo.clear()
       return { cleared: true }
@@ -368,6 +378,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 })
 
 chrome.runtime.onStartup.addListener(async () => {
+  // The cycle alarm is the safety net under an evicted worker. It was created
+  // only on install, so anything that cleared the alarm table (policy, corrupt
+  // storage, dev reload without reinstall) silently removed the net. Re-assert
+  // both alarms on every browser start; creating an existing alarm is a no-op.
+  await chrome.alarms.create(CYCLE_ALARM, { periodInMinutes: 5 })
+  await chrome.alarms.create(MAINTENANCE_ALARM, { periodInMinutes: 720 })
   const settings = await getSettings()
   await registerCustomDomains(settings.customApplyDomains)
   await orchestrator.refreshCounts()

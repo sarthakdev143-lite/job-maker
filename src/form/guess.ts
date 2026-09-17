@@ -20,8 +20,13 @@ import type { FieldDescriptor, Job, Profile } from '@/storage/schemas'
 export type Guess = { value: string; confidence: number; reasoning: string }
 
 /** Questions where an invented answer is worse than no application at all. */
-const OFF_LIMITS =
+export const OFF_LIMITS =
   /sponsor|visa|work permit|authoriz|authoris|right to work|citizen|security clearance|background check consent|felon|convict|licen[sc]e number|social security|ssn|aadhaar|pan number|passport number/i
+
+/** True when the question must never be guessed at (auth, sponsorship, credentials). */
+export function isOffLimitsQuestion(field: FieldDescriptor): boolean {
+  return OFF_LIMITS.test(`${field.label} ${field.placeholder} ${field.name}`.trim())
+}
 
 /** Option text that is true for almost anyone, in descending preference. */
 const SAFE_OPTIONS: RegExp[] = [
@@ -39,7 +44,7 @@ const PLACEHOLDER = /^(\s*|select|select\.\.\.|choose|choose\.\.\.|--.*--|please
  */
 export function guessAnswer(field: FieldDescriptor, profile: Profile, job: Job | null): Guess | null {
   const question = `${field.label} ${field.placeholder} ${field.name}`.trim()
-  if (OFF_LIMITS.test(question)) return null
+  if (isOffLimitsQuestion(field)) return null
 
   const options = field.options.filter((o) => !PLACEHOLDER.test(o.label.trim()))
 

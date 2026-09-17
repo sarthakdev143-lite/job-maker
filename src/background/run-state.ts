@@ -91,3 +91,31 @@ async function write(state: PersistedRun): Promise<void> {
     log.debug(`Could not persist run state: ${(e as Error).message}`)
   }
 }
+
+const BREAKER_KEY = 'agent:breakerFailures'
+
+/**
+ * Consecutive application failures, kept outside the worker.
+ *
+ * The circuit breaker used to count in a memory field that reset to zero on
+ * every eviction -- so a site failing all night never tripped it -- while a
+ * trip itself left the persisted run flag on, resurrecting the run it had just
+ * killed on the next wake. Persisting the count makes both directions honest.
+ */
+export async function loadBreakerCount(): Promise<number> {
+  try {
+    const stored = await chrome.storage.local.get(BREAKER_KEY)
+    const value = stored?.[BREAKER_KEY]
+    return typeof value === 'number' && value >= 0 ? Math.floor(value) : 0
+  } catch {
+    return 0
+  }
+}
+
+export async function saveBreakerCount(count: number): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [BREAKER_KEY]: Math.max(0, Math.floor(count)) })
+  } catch (e) {
+    log.debug(`Could not persist breaker count: ${(e as Error).message}`)
+  }
+}

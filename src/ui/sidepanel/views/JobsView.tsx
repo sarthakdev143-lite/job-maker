@@ -12,7 +12,7 @@ import { Badge, Empty, Spinner, Tabs, scoreTone } from '../../shared/components'
 import { formatRelative } from '@/shared/util'
 import type { Job } from '@/storage/schemas'
 
-type Bucket = 'queued' | 'new' | 'rejected' | 'applied'
+type Bucket = 'queued' | 'new' | 'rejected' | 'applied' | 'skipped' | 'failed'
 
 export default function JobsView() {
   const [bucket, setBucket] = useState<Bucket>('queued')
@@ -28,6 +28,8 @@ export default function JobsView() {
           { id: 'new' as const, label: 'Unscored' },
           { id: 'rejected' as const, label: 'Filtered out' },
           { id: 'applied' as const, label: 'Applied' },
+          { id: 'skipped' as const, label: 'Skipped' },
+          { id: 'failed' as const, label: 'Failed' },
         ]}
         active={bucket}
         onChange={setBucket}
