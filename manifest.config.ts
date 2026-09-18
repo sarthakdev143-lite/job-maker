@@ -108,6 +108,17 @@ export default defineManifest({
       run_at: 'document_idle',
       all_frames: true,
     },
+    // Runs in the page's own world, before its scripts, so a form filled in a
+    // minimized worker window is not told that nobody is watching it. See
+    // src/content/visibility-shim.ts for why that matters for the fill itself
+    // and not only for appearances.
+    {
+      matches: APPLY_MATCHES,
+      js: ['src/content/visibility-shim.ts'],
+      run_at: 'document_start',
+      all_frames: true,
+      world: 'MAIN',
+    },
   ],
 
   web_accessible_resources: [{ resources: ['icons/*', 'assets/*'], matches: ['<all_urls>'] }],

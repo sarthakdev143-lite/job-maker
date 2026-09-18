@@ -23,31 +23,74 @@ export function deepseekBridgeFiles(): string[] {
   return entry?.js ?? []
 }
 
-/** Built file paths for the form agent. */
+/**
+ * Built file paths for the form agent.
+ *
+ * Two declared scripts now match the job sites -- the agent itself and the
+ * page-world visibility shim -- so "the entry that is not DeepSeek" is no
+ * longer specific enough. The shim runs in the MAIN world and is never injected
+ * programmatically, which is exactly what distinguishes them.
+ */
 export function formAgentFiles(): string[] {
-  const entry = manifestScripts()?.find((s) => !s.matches?.some((m) => m.includes(DEEPSEEK_HINT)))
+  const entry = manifestScripts()?.find(
+    (s) =>
+      !s.matches?.some((m) => m.includes(DEEPSEEK_HINT)) &&
+      (s as { world?: string }).world !== 'MAIN'
+  )
   return entry?.js ?? []
 }
 
 /**
- * Inject a script into a tab, ignoring the failures that are expected rather
- * than exceptional: a page we lack host permission for, a tab that navigated
- * away mid-call, a restricted chrome:// URL.
+ * Does the extension hold host permission for this URL?
+ *
+ * Worth asking before blaming the page. Without permission Chrome runs no
+ * declared content script, refuses every programmatic injection, and reports
+ * the eventual sendMessage failure as "Could not establish connection.
+ * Receiving end does not exist." -- which reads like a broken content script
+ * and sent this project chasing selectors for an afternoon.
+ */
+export async function hasHostAccess(url: string): Promise<boolean> {
+  if (!/^https?:/i.test(url)) return true
+  try {
+    return await chrome.permissions.contains({ origins: [originPattern(url)] })
+  } catch {
+    // Only a definite "no" is allowed to block an application. If the question
+    // itself failed -- an unparseable URL, an API this runtime does not expose
+    // -- assume access and let the real failure speak for itself, rather than
+    // inventing a permission problem the user cannot act on.
+    return true
+  }
+}
+
+/** `https://jobs.example.com/x?y` -> `https://jobs.example.com/*`. */
+export function originPattern(url: string): string {
+  const parsed = new URL(url)
+  return `${parsed.protocol}//${parsed.hostname}/*`
+}
+
+/**
+ * Inject a script into a tab.
+ *
+ * Returns the reason it failed rather than a bare false. The failures are not
+ * interchangeable: a missing host permission is a standing condition the user
+ * has to fix once, while a tab that navigated away mid-call is noise. Treating
+ * both as "false" is what turned a one-click permission grant into an
+ * unreadable connection error on every single application.
  */
 export async function injectFiles(
   tabId: number,
   files: string[],
   options: { allFrames?: boolean } = {}
-): Promise<boolean> {
-  if (files.length === 0) return false
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (files.length === 0) return { ok: false, error: 'no content script files in the manifest' }
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: options.allFrames ?? false },
       files,
     })
-    return true
-  } catch {
-    return false
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message }
   }
 }
 
@@ -94,6 +137,7 @@ export async function ensureContentScript<T = unknown>(
   const deadline = Date.now() + timeoutMs
   let injectAttempts = 0
   let lastError = 'no reply'
+  let injectError = ''
 
   while (Date.now() < deadline) {
     try {
@@ -109,13 +153,51 @@ export async function ensureContentScript<T = unknown>(
     const tab = await chrome.tabs.get(tabId).catch(() => null)
     if (!tab) throw new Error(`Tab ${tabId} is gone`)
 
+    // No host permission means no declared script ran and no injection will
+    // ever succeed, so there is nothing to wait out. Fail immediately with the
+    // grant the user actually has to make -- twenty-five seconds of silence
+    // followed by a connection error taught them nothing.
+    const url = tab.url ?? tab.pendingUrl ?? ''
+    if (url && !(await hasHostAccess(url))) {
+      throw new PermissionError(url)
+    }
+
     if (tab.status === 'complete' && injectAttempts < 2) {
       injectAttempts++
-      await injectFiles(tabId, files, { allFrames: options.allFrames })
+      const injected = await injectFiles(tabId, files, { allFrames: options.allFrames })
+      if (!injected.ok) injectError = injected.error
     }
 
     await sleep(300)
   }
 
-  throw new Error(`Content script never responded on tab ${tabId}: ${lastError}`)
+  const detail = injectError ? `${lastError}; injection failed: ${injectError}` : lastError
+  throw new Error(`Content script never responded on tab ${tabId}: ${detail}`)
+}
+
+/**
+ * A missing host permission, carrying the origin that needs granting.
+ *
+ * Typed rather than a plain Error so the runner can tell the one failure the
+ * user can fix in a single click apart from the ones it should just retry.
+ */
+export class PermissionError extends Error {
+  readonly origin: string
+
+  constructor(url: string) {
+    const origin = (() => {
+      try {
+        return originPattern(url)
+      } catch {
+        return url
+      }
+    })()
+    super(
+      `No access to ${origin}. Chrome blocks every script on a site the extension was not granted, ` +
+        `so this application could not even be read. Open Settings -> Advanced -> Site access and ` +
+        `grant access to job sites, then run again.`
+    )
+    this.name = 'PermissionError'
+    this.origin = origin
+  }
 }
