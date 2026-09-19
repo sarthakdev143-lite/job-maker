@@ -182,9 +182,29 @@ async function runInTab<T>(tabId: number, fn: () => T): Promise<T | null> {
   return (result?.result as T | undefined) ?? null
 }
 
-/** Scroll like a reader so lazily-rendered cards actually render. */
+/**
+ * Scroll like a reader so lazily-rendered cards actually render.
+ *
+ * Adaptive rather than a fixed count of passes. Indeed renders its whole result
+ * set eagerly on most layouts, so four unconditional scrolls with a
+ * half-to-one-second pause between them spent five seconds per URL learning
+ * nothing -- multiplied by two dozen URLs, that is the several minutes of
+ * "opens a window, scrolls, closes it" with no jobs to show for it. Stopping as
+ * soon as a pass adds no new cards keeps the slow path for the layouts that
+ * genuinely need it and costs one pass on the ones that do not.
+ */
 async function humanScroll(tabId: number, passes = 4): Promise<void> {
+  let lastCount = -1
   for (let i = 0; i < passes; i++) {
+    const count = await runInTab(tabId, () => document.querySelectorAll('[data-jk], .job_seen_beacon').length).catch(
+      () => null
+    )
+    // Two passes minimum: the first one is what triggers lazy loading at all,
+    // so bailing on the very first unchanged count would under-read a page that
+    // does defer its cards.
+    if (i > 0 && count !== null && count === lastCount) return
+    if (count !== null) lastCount = count
+
     await chrome.scripting
       .executeScript({
         target: { tabId },

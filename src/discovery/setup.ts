@@ -68,12 +68,21 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
   const created: string[] = []
   const notes: string[] = []
 
-  // --- Indeed first --------------------------------------------------------
+  // --- Indeed, as the fallback ----------------------------------------------
   //
-  // Indeed needs no verified board slug, so it is the one source that is always
-  // available, and it is where the volume is. It is built before the board
-  // checks below so that a run is viable even when every board lookup fails.
-  const rolePhrases = dedupePhrases([...keywords, ...DEFAULT_ROLE_PHRASES]).slice(0, 8)
+  // Built first because it needs no verified board slug, so a run is viable
+  // even when every board lookup fails. It is switched off further down if the
+  // board checks succeed, and that is the important part: Indeed is scraped
+  // through a real browser window per search URL, it rate-limits and challenges
+  // that traffic, and applying there needs a login the agent does not have. The
+  // ATS APIs below are a JSON fetch with no window at all, are never blocked,
+  // and lead to forms the agent can actually submit. Searching Indeed when
+  // those exist buys nothing and costs minutes per cycle.
+  //
+  // Four phrases, not eight. Every phrase is two domains times two pages of
+  // windows opened, scrolled and closed, so the URL count is what decides
+  // whether a sweep takes ninety seconds or ten minutes.
+  const rolePhrases = dedupePhrases([...keywords, ...DEFAULT_ROLE_PHRASES]).slice(0, 4)
   const previousIndeed = existing.find((r) => r.source === 'indeed' && r.name.startsWith('Indeed remote'))
   const indeedRecipe: SearchRecipe = {
     id: previousIndeed?.id ?? uid('recipe'),
@@ -91,7 +100,6 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
     lastRunAt: null,
   }
   await saveRecipe(indeedRecipe)
-  created.push(`Indeed remote search across ${rolePhrases.length} role(s): ${rolePhrases.slice(0, 4).join(', ')}…`)
 
   const bySource = (source: BoardSource): string[] =>
     live
@@ -128,8 +136,25 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
     created.push(`${boards.length} ${source} board(s): ${boards.slice(0, 6).join(', ')}${boards.length > 6 ? '…' : ''}`)
   }
 
-  // Indeed alone already counts as somewhere to apply.
-  const hasApplyableBoards = created.length > 1
+  const hasApplyableBoards = created.length > 0
+
+  // Now decide what Indeed is for. With verified boards in hand it is turned
+  // off rather than deleted, so a user who wants it can switch it back on in
+  // one click and keep the role phrases that were built for them.
+  if (hasApplyableBoards) {
+    await saveRecipe({ ...indeedRecipe, enabled: false })
+    notes.push(
+      'Indeed was switched off because the verified boards above are better in every way that matters: ' +
+        'they are read through a public API rather than a browser window, they are never rate-limited, ' +
+        'and they lead to forms the agent can actually submit. Switch it back on under Searches if you want it.'
+    )
+  } else {
+    created.push(`Indeed remote search across ${rolePhrases.length} role(s): ${rolePhrases.join(', ')}`)
+    notes.push(
+      'No company boards could be verified, so Indeed is the only source switched on. It is scraped through ' +
+        'a browser window and can be rate-limited, so expect it to be slower and less reliable than boards.'
+    )
+  }
 
   // Naukri is worth searching for visibility, but the agent cannot submit
   // there, so it is only added when there is nothing better -- otherwise it

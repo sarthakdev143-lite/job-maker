@@ -126,13 +126,22 @@ export async function fetchGreenhouse(recipe: SearchRecipe): Promise<Job[]> {
   for (const board of recipe.boards) {
     const token = board.trim().toLowerCase()
     if (!token) continue
-    const data = await fetchJson<{ jobs?: GreenhouseJob[] }>(
-      `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(token)}/jobs?content=true`
-    )
+    // One board must never be able to end the sweep. A single unreachable or
+    // malformed board used to throw out of this loop and return nothing at
+    // all, so twenty-three healthy boards were lost to one sick one.
+    let data: { jobs?: GreenhouseJob[] } | null = null
+    try {
+      data = await fetchJson<{ jobs?: GreenhouseJob[] }>(
+        `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(token)}/jobs?content=true`
+      )
+    } catch (e) {
+      log.warn(`Greenhouse board ${token} failed: ${(e as Error).message}`)
+      continue
+    }
     if (!data?.jobs) continue
 
     for (const j of data.jobs.slice(0, recipe.maxResultsPerRun)) {
-      const description = htmlToText(decodeURIComponent(escapeSafe(j.content ?? '')))
+      const description = htmlToText(decodeContent(j.content ?? ''))
       out.push(
         makeJob({
           source: 'greenhouse',
@@ -153,11 +162,21 @@ export async function fetchGreenhouse(recipe: SearchRecipe): Promise<Job[]> {
   return out
 }
 
-/** Greenhouse returns HTML-escaped, percent-encoded content in some boards. */
-function escapeSafe(content: string): string {
+/**
+ * Greenhouse returns HTML-escaped content, percent-encoded on some boards.
+ *
+ * The previous version percent-decoded anything containing a '%', which is a
+ * character job descriptions are full of: "100% remote", "20% travel".
+ * `decodeURIComponent` rejects those outright, and because the throw escaped
+ * the board loop, one posting advertising itself as fully remote took down the
+ * entire Greenhouse sweep -- every board, every run. Decode only what actually
+ * looks percent-encoded, and never let a failure lose the text.
+ */
+function decodeContent(content: string): string {
+  if (!content) return ''
+  if (!/%[0-9A-Fa-f]{2}/.test(content)) return content
   try {
-    // Round-trips cleanly for plain content and rescues percent-encoded content.
-    return content.includes('%') ? content : encodeURIComponent(content)
+    return decodeURIComponent(content)
   } catch {
     return content
   }
@@ -182,10 +201,19 @@ export async function fetchLever(recipe: SearchRecipe): Promise<Job[]> {
   for (const board of recipe.boards) {
     const token = board.trim().toLowerCase()
     if (!token) continue
-    const data = await fetchJson<LeverPosting[]>(
-      `https://api.lever.co/v0/postings/${encodeURIComponent(token)}?mode=json`
-    )
-    if (!Array.isArray(data)) continue
+    let data: LeverPosting[] | null = null
+    try {
+      data = await fetchJson<LeverPosting[]>(
+        `https://api.lever.co/v0/postings/${encodeURIComponent(token)}?mode=json`
+      )
+    } catch (e) {
+      log.warn(`Lever board ${token} failed: ${(e as Error).message}`)
+      continue
+    }
+    if (!Array.isArray(data)) {
+      log.warn(`Lever board ${token} returned no postings`)
+      continue
+    }
 
     for (const p of data.slice(0, recipe.maxResultsPerRun)) {
       const lists = (p.lists ?? []).map((l) => `${l.text ?? ''}\n${htmlToText(l.content ?? '')}`).join('\n\n')
@@ -230,9 +258,15 @@ export async function fetchAshby(recipe: SearchRecipe): Promise<Job[]> {
   for (const board of recipe.boards) {
     const token = board.trim()
     if (!token) continue
-    const data = await fetchJson<{ jobs?: AshbyJob[] }>(
-      `https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(token)}?includeCompensation=true`
-    )
+    let data: { jobs?: AshbyJob[] } | null = null
+    try {
+      data = await fetchJson<{ jobs?: AshbyJob[] }>(
+        `https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(token)}?includeCompensation=true`
+      )
+    } catch (e) {
+      log.warn(`Ashby board ${token} failed: ${(e as Error).message}`)
+      continue
+    }
     if (!data?.jobs) continue
 
     for (const j of data.jobs.slice(0, recipe.maxResultsPerRun)) {

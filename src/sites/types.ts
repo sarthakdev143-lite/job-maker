@@ -23,6 +23,21 @@ export type DetectResult = {
   company: string
   multiStep: boolean
   detail: string
+  /**
+   * Pressing the entry button submits the application outright, with no form.
+   *
+   * Naukri's own "Apply" posts the profile already on file and is finished --
+   * but the same page can instead carry "Apply on company site", which merely
+   * redirects to a real ATS. Only the live page can tell those apart, so this
+   * is decided per page by `detect` rather than declared once per adapter.
+   *
+   * Two things depend on it. The autonomy gate normally runs after filling, on
+   * the theory that opening a form commits nothing; where the click is the
+   * application, dry run would quietly send real ones, so the gate is consulted
+   * BEFORE the click. And "no form appeared" stops meaning the adapter misfired
+   * and starts meaning the application is already in.
+   */
+  entrySubmitsImmediately?: boolean
 }
 
 export interface SiteAdapter {

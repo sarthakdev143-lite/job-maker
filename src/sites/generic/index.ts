@@ -11,7 +11,13 @@
  */
 
 import type { SiteAdapter } from '../types'
-import { COMMON_ERROR_SELECTORS, COMMON_SUCCESS_PATTERNS, GENERIC_SUBMIT_TEXT, textOf } from '../types'
+import {
+  COMMON_ERROR_SELECTORS,
+  COMMON_SUCCESS_PATTERNS,
+  GENERIC_NEXT_TEXT,
+  GENERIC_SUBMIT_TEXT,
+  textOf,
+} from '../types'
 
 const APPLICATION_SIGNALS = [
   /upload (your )?(resume|cv)/i,
@@ -20,6 +26,24 @@ const APPLICATION_SIGNALS = [
   /cover letter/i,
   /work authorization/i,
 ]
+
+/**
+ * Does this page carry a control that moves to another step?
+ *
+ * `multiStep` used to be hard-coded false here, which quietly made every
+ * company-hosted wizard unfinishable: the runner filled the first page, never
+ * advanced, and went looking for a submit button that lives three pages later.
+ * A "Continue" button is the signal, and it is the same one a person uses.
+ */
+function hasNextControl(doc: Document): boolean {
+  const controls = Array.from(
+    doc.querySelectorAll<HTMLElement>('button, a[role="button"], div[role="button"], input[type="button"]')
+  )
+  return controls.some((el) => {
+    const label = (textOf(el) || el.getAttribute('aria-label') || (el as HTMLInputElement).value || '').trim()
+    return GENERIC_NEXT_TEXT.test(label)
+  })
+}
 
 export const genericAdapter: SiteAdapter = {
   id: 'generic',
@@ -46,7 +70,7 @@ export const genericAdapter: SiteAdapter = {
       confidence: Math.min(score, 0.75), // never as confident as a real adapter
       jobTitle: textOf(doc.querySelector('h1')) || doc.title,
       company: hostCompany(),
-      multiStep: false,
+      multiStep: hasNextControl(doc),
       detail: `${forms.length} form(s), ${signalHits} application signal(s)`,
     }
   },

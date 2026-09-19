@@ -33,7 +33,17 @@ import type {
 import type { Application, FieldDescriptor, FilledField, Job, Settings } from '@/storage/schemas'
 import { createLogger } from '@/shared/logger'
 import { errorMessage, pause, sleep, uid, withTimeout } from '@/shared/util'
-import { ensureContentScript, formAgentFiles } from '@/shared/injection'
+import { ensureContentScript, formAgentFiles, PermissionError } from '@/shared/injection'
+import {
+  APPLY_CONTROL_THRESHOLD,
+  findApplyControl,
+  findNextControl,
+  NEXT_CONTROL_THRESHOLD,
+  readSubmissionState,
+} from '@/form/page-reasoner'
+import type { PageOutline } from '@/form/outline'
+import { learnApplyEntry, missApplyEntry, rememberedApplyEntry } from '@/storage/site-memory'
+import { recordEvidence } from '@/storage/evidence'
 import { closeWorkerWindow, isOwnedWindow, openWorkerWindow, rememberOwnedWindow } from '@/shared/windows'
 import { activity } from '@/shared/activity'
 
@@ -307,16 +317,37 @@ async function readAdvertDetails(tabId: number): Promise<{
 /** Click the adapter's "apply" entry point, when the form is behind one. */
 async function clickApplyEntry(tabId: number, selectors: string[]): Promise<boolean> {
   if (selectors.length === 0) return false
+
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     args: [selectors],
+    // Serialized into the page, so it cannot import the shared pointer helper
+    // and carries its own small copy: hover, press, release, then the native
+    // activation. A bare `click()` at an element's exact centre is both an
+    // obvious automation signature and, on widgets that listen for `mousedown`,
+    // simply ignored.
     func: (sels: string[]) => {
+      const press = (el: HTMLElement): void => {
+        const r = el.getBoundingClientRect()
+        const x = Math.round(r.left + r.width * (0.35 + Math.random() * 0.3))
+        const y = Math.round(r.top + r.height * (0.35 + Math.random() * 0.3))
+        const at = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y }
+        for (const type of ['pointerover', 'mouseover', 'pointermove', 'mousemove', 'pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+          try {
+            const Ctor = type.startsWith('pointer') && typeof PointerEvent === 'function' ? PointerEvent : MouseEvent
+            el.dispatchEvent(new Ctor(Ctor === MouseEvent ? type.replace('pointer', 'mouse') : type, at))
+          } catch {
+            // An event this DOM cannot build is not a reason to skip the click.
+          }
+        }
+        el.click()
+      }
       for (const sel of sels) {
         try {
           const el = document.querySelector(sel) as HTMLElement | null
           if (el) {
-            el.scrollIntoView({ block: 'center' })
-            el.click()
+            el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+            press(el)
             return true
           }
         } catch {
@@ -327,6 +358,135 @@ async function clickApplyEntry(tabId: number, selectors: string[]): Promise<bool
     },
   })
   return Boolean(result?.result)
+}
+
+/* --------------------------------------------------- model-read navigation */
+
+/**
+ * Ask the page to describe itself, in a form a model can read.
+ *
+ * Failing softly on purpose. Every caller of this is already on a fallback
+ * path, and an outline that could not be taken should leave the original
+ * failure standing rather than replace it with a messaging error.
+ */
+async function outlineOf(tab: WorkerTab): Promise<PageOutline | null> {
+  try {
+    const res = await callAgent<Extract<FormResponse, { type: 'form:outline' }>>(tab, { type: 'form:outline' })
+    return res.outline
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Find the apply control by asking the model to read the page.
+ *
+ * Runs only after the adapter's selectors have already missed. Records what it
+ * saw on the application's timeline either way: a fallback that fails is the
+ * single most useful thing to be able to read afterwards, and the old code
+ * recorded nothing at all.
+ */
+async function applyControlFromModel(
+  tab: WorkerTab,
+  job: Job,
+  applicationId: string
+): Promise<{ selector: string; text: string }> {
+  const outline = await outlineOf(tab)
+  if (!outline) {
+    await applicationsRepo.addTimeline(applicationId, 'fallback', 'could not read the page to ask the model', 'warn')
+    return { selector: '', text: '' }
+  }
+
+  try {
+    const found = await findApplyControl(outline, { title: job.title, company: job.company })
+    if (!found.selector || found.confidence < APPLY_CONTROL_THRESHOLD) {
+      await applicationsRepo.addTimeline(
+        applicationId,
+        'fallback',
+        found.selector
+          ? `model found "${found.text}" but was only ${Math.round(found.confidence * 100)}% sure; not clicking it`
+          : `model found no apply control among ${outline.elements.length} control(s): ${found.reasoning}`,
+        'warn'
+      )
+      return { selector: '', text: '' }
+    }
+
+    await applicationsRepo.addTimeline(
+      applicationId,
+      'fallback',
+      `selectors missed; model chose "${found.text}" (${Math.round(found.confidence * 100)}%): ${found.reasoning}`
+    )
+    return { selector: found.selector, text: found.text }
+  } catch (e) {
+    await applicationsRepo.addTimeline(applicationId, 'fallback', `model could not read the page: ${errorMessage(e)}`, 'warn')
+    return { selector: '', text: '' }
+  }
+}
+
+/**
+ * Move a multi-step form on when its own continue control could not be found.
+ *
+ * Refuses anything the model says would submit. The autonomy gate runs after
+ * the form is filled and before submission for a reason, and a wizard step that
+ * quietly turns out to be the send button would walk straight past it -- which
+ * on a dry run means sending an application the user explicitly asked not to
+ * send.
+ */
+async function advanceViaModel(
+  tab: WorkerTab,
+  applicationId: string,
+  answered: number
+): Promise<{ advanced: boolean; detail: string }> {
+  const outline = await outlineOf(tab)
+  if (!outline) return { advanced: false, detail: '' }
+
+  try {
+    const next = await findNextControl(outline, answered)
+    if (!next.selector || next.confidence < NEXT_CONTROL_THRESHOLD) {
+      return {
+        advanced: false,
+        detail: next.selector
+          ? `model suggested "${next.text}" to continue but was only ${Math.round(next.confidence * 100)}% sure`
+          : `model found nothing that continues this form: ${next.reasoning}`,
+      }
+    }
+
+    if (next.submits) {
+      return {
+        advanced: false,
+        detail: `model says "${next.text}" would submit rather than continue; leaving that to the gate`,
+      }
+    }
+
+    const res = await callAgent<Extract<FormResponse, { type: 'form:click' }>>(tab, {
+      type: 'form:click',
+      selector: next.selector,
+    })
+    if (!res.clicked) return { advanced: false, detail: `could not click "${next.text}": ${res.detail}` }
+
+    // Clicking is not advancing. The page has to actually change, and a wizard
+    // that refuses validation looks identical to one that moved unless asked.
+    await sleep(1500)
+    const after = await outlineOf(tab)
+    const moved = !after || after.url !== outline.url || after.headings.join('|') !== outline.headings.join('|')
+
+    await applicationsRepo.addTimeline(
+      applicationId,
+      'wizard',
+      moved
+        ? `model advanced the form with "${next.text}": ${next.reasoning}`
+        : `model clicked "${next.text}" but the form did not move`,
+      moved ? 'info' : 'warn'
+    )
+    return { advanced: moved, detail: moved ? `model chose "${next.text}"` : 'the form did not move' }
+  } catch (e) {
+    return { advanced: false, detail: `model could not read the form: ${errorMessage(e)}` }
+  }
+}
+
+/** Persist a selector the model found and that then worked. */
+async function rememberApplySelector(url: string, selector: string, text: string): Promise<void> {
+  await learnApplyEntry(url, selector, text).catch(() => {})
 }
 
 /* ------------------------------------------------------------- the machine */
@@ -365,6 +525,11 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
     const vendor = detect.vendor || vendorForUrl(targetUrl)
     const adapter = adapterById(vendor)
 
+    // Both only matter on a site where the entry button submits outright, but
+    // they are read after the block that sets them.
+    let entryClicked = false
+    let oneClickDecision: GateDecision | null = null
+
     if (!detect.isApplicationForm) {
       step('enter form')
       // The record may carry only a card snippet (volume mode skips hydration).
@@ -397,8 +562,102 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       } catch {
         // Best effort: the advert is still drivable without the backfill.
       }
+      // On a one-click site the entry button IS the application. The gate
+      // normally runs after filling, which would be far too late: dry run would
+      // have already sent it. Ask first, and do not touch the button unless the
+      // answer is yes.
+      if (detect.entrySubmitsImmediately) {
+        const autonomyNow = options.forceDryRun
+          ? { ...settings.autonomy, mode: 'dry_run' as const }
+          : settings.autonomy
+        oneClickDecision = evaluateGate({
+          autonomy: autonomyNow,
+          ignoreActiveHours: options.ignoreActiveHours,
+          matchScore: job.matchScore,
+          // There is no form to fill, so there is nothing to be unsure about;
+          // the risk here is the decision to apply at all, not the answers.
+          fillConfidence: 1,
+          plan: [],
+          unresolved: [],
+          vendor,
+          vendorEnabled: settings.enabledSites[vendor] ?? false,
+          reachedFinalStep: true,
+          appliedToday: await getCounter(dailyCounterKey()),
+          appliedTodayOnVendor: await getCounter(dailyCounterKey(vendor)),
+          now: new Date(),
+        })
+
+        if (oneClickDecision.action !== 'submit') {
+          const why = oneClickDecision.reasons.join('; ') || 'autonomy settings'
+          await applicationsRepo.addTimeline(
+            application.id,
+            'gate',
+            `not clicking apply: on ${adapter.label} that button submits immediately, and ${why}`,
+            'warn'
+          )
+          const parked = await applicationsRepo.update(application.id, {
+            status: oneClickDecision.action === 'skip' ? 'skipped' : 'needs_review',
+            vendor,
+            error: `one-click apply held back: ${why}`,
+          })
+          await jobsRepo.update(job.id, {
+            status: oneClickDecision.action === 'skip' ? 'skipped' : 'queued',
+            rejectReason: oneClickDecision.action === 'skip' ? why : '',
+          })
+          return { application: parked!, decision: oneClickDecision, submitted: false }
+        }
+      }
+
       const tabsBefore = await openTabIds()
-      const clicked = await clickApplyEntry(tab.tabId, adapter.applyEntrySelectors ?? [])
+
+      // What was learned here last time, first. A selector the model found and
+      // that then worked is both cheaper and more specific than the adapter's
+      // generic list, and trying it first is what stops the fallback from
+      // becoming a permanent per-application cost on the same site.
+      const remembered = await rememberedApplyEntry(targetUrl).catch(() => '')
+      let clicked = false
+      if (remembered) {
+        const res = await callAgent<Extract<FormResponse, { type: 'form:click' }>>(tab, {
+          type: 'form:click',
+          selector: remembered,
+        }).catch(() => ({ clicked: false, detail: 'agent did not answer' }))
+        clicked = res.clicked
+        if (clicked) {
+          step('enter form', `used the apply control learned here earlier`)
+          await learnApplyEntry(targetUrl, remembered, '').catch(() => {})
+        } else {
+          // Sites change. A remembered selector that stops working has to be
+          // able to age out, or one bad memory becomes a permanent outage.
+          await missApplyEntry(targetUrl).catch(() => {})
+        }
+      }
+
+      if (!clicked) clicked = await clickApplyEntry(tab.tabId, adapter.applyEntrySelectors ?? [])
+
+      // The adapter's selectors missed. That is the normal state of affairs on
+      // a site nobody has written an adapter for, and an increasingly common
+      // one on sites that have one, because markup rotates. Rather than skip a
+      // job that a person looking at the page could apply to in one click, ask
+      // the model to read the page and point at the control.
+      if (!clicked) {
+        const fallback = await applyControlFromModel(tab, job, application.id)
+        if (fallback.selector) {
+          const res = await callAgent<Extract<FormResponse, { type: 'form:click' }>>(tab, {
+            type: 'form:click',
+            selector: fallback.selector,
+          })
+          clicked = res.clicked
+          if (clicked) {
+            step('enter form', `model found the apply control: "${fallback.text}"`)
+            // Worth remembering. The next job at this company costs no model
+            // call at all, which is the difference between a fallback and a
+            // second permanent cost.
+            await rememberApplySelector(targetUrl, fallback.selector, fallback.text)
+          }
+        }
+      }
+
+      entryClicked = clicked
       if (clicked) {
         await sleep(2500)
         const movedTab = await adoptNewTab(tabsBefore, tab, 8000)
@@ -413,8 +672,68 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       }
     }
 
+    // A one-click site that shows no form after the click has not failed -- it
+    // has finished. Checking the page for its own confirmation is the only way
+    // to tell that from a misfire, and skipping without looking is how a real
+    // submission got recorded as "no application form found".
+    if (!detect.isApplicationForm && oneClickDecision && entryClicked) {
+      step('verify')
+      const oneClick = await verifySubmission(tab)
+      await applicationsRepo.addTimeline(
+        application.id,
+        'verify',
+        `one-click apply: ${oneClick.signal}: ${oneClick.detail}`,
+        oneClick.submitted ? 'info' : 'warn'
+      )
+
+      if (oneClick.submitted) {
+        await bumpCounter(dailyCounterKey())
+        await bumpCounter(dailyCounterKey(vendor))
+        await jobsRepo.update(job.id, { status: 'applied' })
+        const updated = await applicationsRepo.update(application.id, {
+          status: 'submitted',
+          vendor,
+          submittedAt: Date.now(),
+          error: '',
+        })
+        log.info(`Submitted (one click): ${job.title} at ${job.company}`, {}, job.id)
+        if (settings.autonomy.notifyOnSubmit) {
+          notify('Application submitted', `${job.title} at ${job.company}`)
+        }
+        return {
+          application: updated!,
+          decision: oneClickDecision ?? { action: 'submit', reasons: ['one-click apply'] },
+          submitted: true,
+        }
+      }
+
+      // Clicked, no form, no confirmation. It may have landed and said so in
+      // wording we do not recognise, so this is a human's call, not a skip.
+      const unsure = await applicationsRepo.update(application.id, {
+        status: 'needs_review',
+        vendor,
+        error: `clicked apply on ${adapter.label} but saw no confirmation - ${oneClick.detail}`,
+      })
+      return {
+        application: unsure!,
+        decision: { action: 'review', reasons: ['one-click apply was not confirmed'] },
+        submitted: false,
+      }
+    }
+
     if (!detect.isApplicationForm) {
       const reason = detect.detail || 'no application form found on this page'
+      // Keep what the page looked like. "No application form found" is true and
+      // useless on its own: without the controls that WERE on screen there is
+      // no way to tell a stale selector from an expired listing from a login
+      // wall, and a job that only appears once cannot be re-examined by hand.
+      await recordEvidence({
+        jobId: job.id,
+        applicationId: application.id,
+        stage: 'detect',
+        reason,
+        outline: await outlineOf(tab),
+      })
       await finishAsSkipped(application.id, reason)
       await jobsRepo.update(job.id, { status: 'skipped', rejectReason: reason })
       return {
@@ -437,16 +756,33 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       harvest.fields.some((f) => /cover letter/i.test(f.label) || f.kind === 'file')
 
     let docs = { resumeDocId: '', coverDocId: '', coverLetterText: '' }
-    if (needsResume || needsCover) {
+
+    /**
+     * Generate the resume and cover letter, once, the first time a page asks.
+     *
+     * This used to run only if the *first* page carried a file input, which on
+     * a wizard is usually the one page that does not: Indeed asks for the
+     * resume on step two, and plenty of company forms on step three. No
+     * document was ever generated, nothing was attached, and the form then
+     * refused to advance past its own required upload -- a fully answered
+     * application abandoned one click from the end.
+     */
+    const ensureDocs = async (wantResume: boolean, wantCover: boolean): Promise<void> => {
+      if (!wantResume && !wantCover) return
+      if ((!wantResume || docs.resumeDocId) && (!wantCover || docs.coverDocId)) return
       step('documents')
-      const generated = await generateDocuments(profile, job, settings, {
-        needResume: needsResume,
-        needCoverLetter: needsCover,
+      // `job` is reassigned when the advert is backfilled, so re-read it here
+      // rather than relying on the narrowing from the top of the function.
+      const forJob = job
+      if (!forJob) throw new Error('Job record vanished mid-application')
+      const generated = await generateDocuments(profile, forJob, settings, {
+        needResume: wantResume,
+        needCoverLetter: wantCover,
       })
       docs = {
-        resumeDocId: generated.resumeDocId,
-        coverDocId: generated.coverDocId,
-        coverLetterText: generated.coverLetterText,
+        resumeDocId: generated.resumeDocId || docs.resumeDocId,
+        coverDocId: generated.coverDocId || docs.coverDocId,
+        coverLetterText: generated.coverLetterText || docs.coverLetterText,
       }
       await applicationsRepo.update(application.id, { docs })
       if (generated.fabricationReport && !generated.fabricationReport.clean) {
@@ -458,6 +794,8 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
         )
       }
     }
+
+    await ensureDocs(needsResume, needsCover)
 
     // --- fill, one page at a time -----------------------------------------
     const allPlan: FilledField[] = []
@@ -513,6 +851,14 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       }
 
       // --- attach documents on whichever page asks for them -----------------
+      // Whatever this page asks for, produce it now if it does not exist yet.
+      if (resolved.documentTargets.length > 0) {
+        await ensureDocs(
+          resolved.documentTargets.some((t) => t.key !== 'coverLetter'),
+          resolved.documentTargets.some((t) => t.key === 'coverLetter') && settings.documents.generateCoverLetter
+        )
+      }
+
       for (const target of resolved.documentTargets) {
         const docId = target.key === 'coverLetter' ? docs.coverDocId : docs.resumeDocId
         if (!docId) continue
@@ -593,9 +939,23 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
 
       // --- advance a wizard, or stop ---------------------------------------
       if (!detect.multiStep) break
-      const advance = await callAgent<Extract<FormResponse, { type: 'form:advanceStep' }>>(tab, {
+      let advance = await callAgent<Extract<FormResponse, { type: 'form:advanceStep' }>>(tab, {
         type: 'form:advanceStep',
       })
+
+      // The wizard is where selector lists fail worst: Naukri drives its whole
+      // application through a chat drawer, Indeed relabels one button at every
+      // step. When the page did not move, ask the model which control does --
+      // stopping here means an application that is fully filled in and never
+      // sent, which is the worst outcome available.
+      if (!advance.advanced) {
+        const moved = await advanceViaModel(tab, application.id, resolved.plan.length)
+        if (moved.advanced) advance = { ...advance, advanced: true, detail: moved.detail }
+        else if (moved.detail) {
+          await applicationsRepo.addTimeline(application.id, 'wizard', moved.detail, 'warn')
+        }
+      }
+
       if (!advance.advanced) {
         await applicationsRepo.addTimeline(
           application.id,
@@ -722,7 +1082,16 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
     }
 
     // Clicked but not confirmed: almost always a validation error. Park it with
-    // the page's own complaint attached rather than retrying blindly.
+    // the page's own complaint attached rather than retrying blindly, and keep
+    // the page itself -- this is the failure a user most often has to judge by
+    // hand, and the reason string alone never says enough to judge it.
+    await recordEvidence({
+      jobId: job.id,
+      applicationId: application.id,
+      stage: 'verify',
+      reason: `submitted but not confirmed - ${verdict.detail}`,
+      outline: await outlineOf(tab),
+    })
     const updated = await applicationsRepo.update(application.id, {
       status: 'needs_review',
       error: `submitted but not confirmed - ${verdict.detail}`,
@@ -739,6 +1108,30 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
     const message = errorMessage(e)
     log.error(`Application failed: ${message}`, undefined, jobId)
     await applicationsRepo.addTimeline(application.id, 'error', message, 'error')
+
+    // A missing host permission is not this job's fault and will not be any
+    // different on the next one -- it would fail the whole queue identically.
+    // Leave the job queued so it runs for real once access is granted, and let
+    // it reach the orchestrator, which stops the run instead of grinding
+    // through a hundred jobs producing the same error.
+    // Whatever went wrong, keep the page. This is the catch that produced the
+    // unreadable one-line failures the user spent a night guessing at.
+    if (tab) {
+      await recordEvidence({
+        jobId,
+        applicationId: application.id,
+        stage: 'apply',
+        reason: message,
+        outline: await outlineOf(tab),
+      })
+    }
+
+    if (e instanceof PermissionError) {
+      await applicationsRepo.update(application.id, { status: 'queued', error: message })
+      await jobsRepo.update(jobId, { status: 'queued' })
+      throw e
+    }
+
     const updated = await applicationsRepo.update(application.id, { status: 'failed', error: message })
     await jobsRepo.update(jobId, { status: 'failed' })
     return {
@@ -873,6 +1266,48 @@ async function harvestStep(tab: WorkerTab): Promise<{ fields: FieldDescriptor[];
 }
 
 async function verifySubmission(tab: WorkerTab): Promise<FormVerifyResult> {
+  const bySelectors = await verifyBySelectors(tab)
+
+  // A confident answer either way is the end of it. Only `no_signal` -- the
+  // adapter looked and could not tell -- is worth a model call, and that is the
+  // common case: every ATS words its confirmation differently, and a list of
+  // regexes only ever covers the ones somebody has already seen. Treating "I
+  // could not tell" as "it failed" is what sent real submissions to the review
+  // queue and left the user to re-check them by hand.
+  if (bySelectors.submitted || bySelectors.signal === 'validation_error') return bySelectors
+
+  const outline = await outlineOf(tab)
+  if (!outline) return bySelectors
+
+  try {
+    const reading = await readSubmissionState(outline)
+    if (reading.submitted) {
+      return {
+        submitted: true,
+        signal: 'model_confirmed',
+        detail: `model read the page as submitted (${Math.round(reading.confidence * 100)}%): ${reading.evidence}`,
+      }
+    }
+    if (reading.state === 'rejected') {
+      return {
+        submitted: false,
+        signal: 'validation_error',
+        detail: `model read a rejection: ${reading.evidence || 'no wording given'}`,
+      }
+    }
+    return {
+      submitted: false,
+      signal: bySelectors.signal,
+      detail: `${bySelectors.detail}; model said ${reading.state} (${Math.round(reading.confidence * 100)}%)${reading.evidence ? `: ${reading.evidence}` : ''}`,
+    }
+  } catch (e) {
+    // The model being unavailable must not turn an unknown into a failure.
+    return { ...bySelectors, detail: `${bySelectors.detail}; model check failed: ${errorMessage(e)}` }
+  }
+}
+
+/** The fast path: the adapter's own confirmation elements and phrases. */
+async function verifyBySelectors(tab: WorkerTab): Promise<FormVerifyResult> {
   // Confirmation can be a navigation or an in-place re-render, so poll rather
   // than checking once; a slow redirect otherwise reads as a failed submit.
   // Generous, because this is the one wait that must not be cut short. Indeed
@@ -986,6 +1421,133 @@ function notify(title: string, message: string): void {
 }
 
 /** Fill a single URL without a Job record. Powers "try this page" in the UI. */
+/**
+ * Walk one job page without touching it.
+ *
+ * The self-test's eyes. It does everything a real application does up to the
+ * first keystroke -- open the page, get the agent in, detect, find the form,
+ * harvest the fields, work out the answers -- and then stops. Nothing is
+ * typed, nothing is clicked, nothing is submitted.
+ *
+ * This is the only kind of test that could have caught any of the failures that
+ * actually happened: a host permission Chrome never granted, a content script
+ * that could not be injected, an adapter whose selectors had rotated. None of
+ * those are visible to a unit test, because none of them are about logic.
+ */
+export type PageProbe = {
+  url: string
+  ok: boolean
+  /** Where it got to: 'open' | 'agent' | 'detect' | 'harvest' | 'resolve'. */
+  reached: string
+  vendor: string
+  isApplicationForm: boolean
+  multiStep: boolean
+  fields: number
+  resolved: number
+  unresolved: number
+  /** How the adapter's own selectors fared, before any model fallback. */
+  applyEntryFound: boolean
+  confidence: number
+  error: string
+  elapsedMs: number
+  /** Present when something failed: what was actually on the page. */
+  outline: PageOutline | null
+}
+
+export async function probeJobPage(url: string, options: { timeoutMs?: number } = {}): Promise<PageProbe> {
+  const startedAt = Date.now()
+  const result: PageProbe = {
+    url,
+    ok: false,
+    reached: 'open',
+    vendor: '',
+    isApplicationForm: false,
+    multiStep: false,
+    fields: 0,
+    resolved: 0,
+    unresolved: 0,
+    applyEntryFound: false,
+    confidence: 0,
+    error: '',
+    elapsedMs: 0,
+    outline: null,
+  }
+
+  const [settings, profile] = await Promise.all([getSettings(), getProfile()])
+  let tab: WorkerTab | null = null
+
+  try {
+    tab = await withTimeout(openTab(url), options.timeoutMs ?? 40000, `opening ${url}`)
+    await waitForLoad(tab.tabId)
+
+    result.reached = 'agent'
+    await ensureAgent(tab.tabId)
+
+    result.reached = 'detect'
+    tab.frameId = await pickFormFrame(tab.tabId)
+    const detect = (await callAgent<Extract<FormResponse, { type: 'form:detect' }>>(tab, { type: 'form:detect' }))
+      .result
+    result.vendor = detect.vendor || vendorForUrl(url)
+    result.isApplicationForm = detect.isApplicationForm
+    result.multiStep = detect.multiStep
+
+    // Does the adapter still recognise its own apply button? Asked without
+    // clicking: this is the single most common thing to rot, and knowing it has
+    // rotted is worth more than any number of passing unit tests.
+    const adapter = adapterById(result.vendor)
+    result.applyEntryFound = await hasApplyEntry(tab.tabId, adapter.applyEntrySelectors ?? [])
+
+    result.reached = 'harvest'
+    const harvest = await harvestStep(tab)
+    result.fields = harvest.fields.length
+
+    if (harvest.fields.length > 0) {
+      result.reached = 'resolve'
+      const resolved = await resolveFields({
+        fields: harvest.fields,
+        profile,
+        job: null,
+        vendor: result.vendor,
+        settings,
+        url,
+      })
+      result.resolved = resolved.plan.length
+      result.unresolved = resolved.unresolved.length
+      result.confidence = resolved.confidence
+    }
+
+    result.ok = detect.isApplicationForm || result.applyEntryFound || harvest.fields.length > 0
+    if (!result.ok) result.outline = await outlineOf(tab)
+    return result
+  } catch (e) {
+    result.error = errorMessage(e)
+    if (tab) result.outline = await outlineOf(tab)
+    return result
+  } finally {
+    result.elapsedMs = Date.now() - startedAt
+    await closeTab(tab)
+  }
+}
+
+/** Would the adapter's apply selectors match, without clicking anything? */
+async function hasApplyEntry(tabId: number, selectors: string[]): Promise<boolean> {
+  if (selectors.length === 0) return false
+  const [found] = await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      args: [selectors],
+      func: (sels: string[]) => sels.some((sel) => {
+        try {
+          return Boolean(document.querySelector(sel))
+        } catch {
+          return false
+        }
+      }),
+    })
+    .catch(() => [{ result: false }])
+  return Boolean(found?.result)
+}
+
 export async function dryRunUrl(url: string): Promise<{ fields: number; plan: FilledField[]; unresolved: FieldDescriptor[] }> {
   const [settings, profile] = await Promise.all([getSettings(), getProfile()])
   let tab: WorkerTab | null = null
@@ -1004,11 +1566,17 @@ export async function dryRunUrl(url: string): Promise<{ fields: number; plan: Fi
       settings,
       url,
     })
-    await callAgent(tab, {
-      type: 'form:fill',
-      plan: resolved.plan,
-      pacing: settings.autonomy.delayBetweenFieldsMs,
-    })
+    // Record what actually stuck. Reporting the plan alone made a dry run
+    // unable to tell a filled form from one that refused every value, which is
+    // precisely the question a dry run exists to answer.
+    const fill = (
+      await callAgent<Extract<FormResponse, { type: 'form:fill' }>>(tab, {
+        type: 'form:fill',
+        plan: resolved.plan,
+        pacing: settings.autonomy.delayBetweenFieldsMs,
+      })
+    ).result
+    recordFillOutcome(resolved.plan, fill)
     if (resolved.unresolved.length > 0) {
       await callAgent(tab, { type: 'form:highlight', selectors: resolved.unresolved.map((f) => f.selector) }).catch(
         () => {}

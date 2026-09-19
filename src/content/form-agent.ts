@@ -11,12 +11,25 @@
  */
 
 import { harvestFields, pageText } from '@/form/harvester'
+import { outlinePage } from '@/form/outline'
 import { applyFillPlan, attachFile } from '@/form/filler'
 import { adapterForUrl } from '@/sites/registry'
 import { findSubmitByText } from '@/sites/generic'
 import { GENERIC_NEXT_TEXT, firstMatch } from '@/sites/types'
 import { workdayNeedsAccount } from '@/sites/workday'
+import { humanClick } from '@/human/pointer'
+import { personaForPage } from '@/human/persona'
 import type { FormRequest, FormResponse } from '@/shared/messages'
+
+/**
+ * Press a control the way a person does -- approach, hover, press, release --
+ * rather than firing a bare `click` at its dead centre. Some wizard controls
+ * only react to `mousedown`, so this is also the more reliable press.
+ */
+async function pressControl(el: HTMLElement): Promise<void> {
+  const persona = await personaForPage()
+  await humanClick(el, { pressMs: persona.pressMs })
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
@@ -106,6 +119,15 @@ function clickableNext(): { el: HTMLElement; selector: string } | null {
  * route, and finally the disappearance of the form itself. Visible validation
  * errors override all of it -- a form that is complaining has not submitted.
  */
+/** How a form says it will not take this application, in words. */
+const REFUSAL_PATTERNS = [
+  /there was an error processing your application[^.]*\.?/i,
+  /(your )?application could not be (submitted|processed)[^.]*\.?/i,
+  /we could not (submit|process) your application[^.]*\.?/i,
+  /something went wrong[^.]{0,60}(application|submit)[^.]*\.?/i,
+  /please (try again|complete the reCAPTCHA|verify)[^.]{0,60}\.?/i,
+]
+
 function verifySubmission(): { submitted: boolean; signal: string; detail: string } {
   const adapter = adapterForUrl(location.href)
 
@@ -138,6 +160,17 @@ function verifySubmission(): { submitted: boolean; signal: string; detail: strin
   }
 
   const text = pageText(document, 6000)
+
+  // A refusal the page states in prose rather than in an error element.
+  // Greenhouse answers a submission its bot check does not like with "There
+  // was an error processing your application", in a plain node that matches no
+  // error selector -- so the run reported "no signal" and the user was told
+  // nothing more useful than that the page had not changed.
+  for (const re of REFUSAL_PATTERNS) {
+    const hit = text.match(re)
+    if (hit) return { submitted: false, signal: 'refused', detail: hit[0].slice(0, 200) }
+  }
+
   for (const re of adapter.successPatterns) {
     const hit = text.match(re)
     if (hit) return { submitted: true, signal: 'success_text', detail: hit[0].slice(0, 160) }
@@ -191,7 +224,17 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
       const result = adapter.detect(document, location.href)
       // The same guard `clickableSubmit` consults, surfaced so the runner can
       // stop advancing the moment the final screen is reached.
-      const readyToSubmit = adapter.canSubmit ? adapter.canSubmit(document, location.href) : true
+      //
+      // Without an adapter opinion the answer used to be an unconditional yes,
+      // which is wrong on every company-hosted wizard: the runner was told the
+      // first page was the last one, broke out of the step loop, went looking
+      // for a submit button that only exists three pages later, and parked a
+      // half-filled application as "no submit control found". Asking whether
+      // this page actually has a submit control is both the honest answer and
+      // exactly what the submit step will do next.
+      const readyToSubmit = adapter.canSubmit
+        ? adapter.canSubmit(document, location.href)
+        : Boolean(clickableSubmit())
       const needsAccount = adapter.id === 'workday' && workdayNeedsAccount(document)
       return {
         ok: true,
@@ -203,6 +246,7 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
           company: result.company,
           confidence: needsAccount ? 0 : result.confidence,
           multiStep: result.multiStep,
+          entrySubmitsImmediately: result.entrySubmitsImmediately ?? false,
           detail: needsAccount ? 'Workday requires an account for this employer' : result.detail,
           readyToSubmit,
         },
@@ -239,9 +283,7 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
       if (!target) {
         return { ok: true, type: 'form:submit', result: { clicked: false, selector: '', detail: 'no submit control found' } }
       }
-      target.el.scrollIntoView({ block: 'center' })
-      await sleep(300)
-      target.el.click()
+      await pressControl(target.el)
       return {
         ok: true,
         type: 'form:submit',
@@ -254,9 +296,7 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
       const next = clickableNext()
 
       if (next) {
-        next.el.scrollIntoView({ block: 'center' })
-        await sleep(250)
-        next.el.click()
+        await pressControl(next.el)
         await sleep(1200) // let the wizard render the following step
         if (stepSignature() !== before) {
           return { ok: true, type: 'form:advanceStep', advanced: true, detail: next.selector }
@@ -276,9 +316,7 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
         }
       }
 
-      skip.el.scrollIntoView({ block: 'center' })
-      await sleep(250)
-      skip.el.click()
+      await pressControl(skip.el)
       await sleep(1200)
       const moved = stepSignature() !== before
       return {
@@ -300,6 +338,29 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
         text: pageText(document),
       }
 
+    case 'form:outline':
+      return { ok: true, type: 'form:outline', outline: outlinePage(document, location.href) }
+
+    case 'form:click': {
+      let el: HTMLElement | null = null
+      try {
+        el = document.querySelector<HTMLElement>(msg.selector)
+      } catch {
+        return { ok: true, type: 'form:click', clicked: false, detail: `unusable selector: ${msg.selector}` }
+      }
+      if (!el) return { ok: true, type: 'form:click', clicked: false, detail: 'selector matched nothing' }
+      if ((el as HTMLButtonElement).disabled) {
+        return { ok: true, type: 'form:click', clicked: false, detail: 'control is disabled' }
+      }
+      await pressControl(el)
+      return {
+        ok: true,
+        type: 'form:click',
+        clicked: true,
+        detail: (el.innerText ?? el.getAttribute('aria-label') ?? '').trim().slice(0, 80),
+      }
+    }
+
     case 'form:highlight':
       highlight(msg.selectors)
       return { ok: true, type: 'form:highlight' }
@@ -320,6 +381,6 @@ export function openApplyForm(): boolean {
   const adapter = adapterForUrl(location.href)
   const el = firstMatch(document, adapter.applyEntrySelectors ?? [])
   if (!el) return false
-  el.click()
+  void pressControl(el)
   return true
 }
