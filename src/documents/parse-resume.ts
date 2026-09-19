@@ -39,6 +39,41 @@ export type ImportResult = {
   skipped: string[]
 }
 
+/**
+ * Did the model actually read the document, or hand back a shell?
+ *
+ * Every field in ParsedResumeSchema carries a `.default()`. That is right for a
+ * resume which genuinely omits a GPA, but it also means a reply of `{}` -- or
+ * one whose keys we do not recognise -- validates perfectly and arrives here as
+ * a fully-empty object. `mergeIntoProfile` then skips every empty field and the
+ * import reports success having changed nothing, so a failed extraction looked
+ * identical to a resume with no content in it. That silence is the actual
+ * problem: the user is told it worked and the profile stays blank.
+ *
+ * A real resume always yields at least a name, a contact detail, a role, a
+ * qualification or a skill. None of those means the document was not read.
+ *
+ * The prompt ends with a shape example containing one blank role, and weaker
+ * models sometimes echo it verbatim, so a role with neither company nor title
+ * does not count as content either.
+ */
+export function isHollowParse(parsed: ParsedResume): boolean {
+  const named = Boolean(parsed.firstName.trim() || parsed.lastName.trim())
+  const contactable = Boolean(parsed.email.trim() || parsed.phone.trim())
+  const realRoles = parsed.experience.filter((r) => r.company.trim() || r.title.trim())
+  const realEducation = parsed.education.filter((e) => e.school.trim() || e.degree.trim())
+
+  return (
+    !named &&
+    !contactable &&
+    realRoles.length === 0 &&
+    realEducation.length === 0 &&
+    parsed.skills.length === 0 &&
+    !parsed.summary.trim() &&
+    !parsed.headline.trim()
+  )
+}
+
 export async function parseResumeText(text: string, settings: Settings): Promise<ParsedResume> {
   const cleaned = normalizeResumeText(text)
   if (cleaned.length < 80) {
@@ -53,6 +88,28 @@ export async function parseResumeText(text: string, settings: Settings): Promise
     { prompt, schema: ParsedResumeSchema, freshContext: true },
     'parse resume'
   )
+
+  if (isHollowParse(parsed)) {
+    // Reporting the character count separates "the PDF did not read" from "the
+    // PDF read fine and the model returned nothing" -- two completely different
+    // things to go and fix.
+    log.error('Resume parse came back empty', {
+      extractedChars: cleaned.length,
+      driver: settings.llm.driver,
+      model: settings.llm.model,
+    })
+    throw new Error(
+      `The model returned nothing for this resume. ${cleaned.length.toLocaleString()} characters were ` +
+        `read out of the file, so the file itself is fine — the reply came back empty.\n\n` +
+        `In Settings → Model:\n` +
+        `• Press "Run test". If that fails, the driver is the problem, not the resume.\n` +
+        `• On NVIDIA NIM, check the key is valid and the model is an instruct model — ` +
+        `Press "List available models" to see what your key can actually call — providers ` +
+        `retire models without notice, and a retired one fails exactly like this.\n` +
+        `• On the DeepSeek web driver, check you are still signed in at chat.deepseek.com.\n\n` +
+        `Currently set to: ${settings.llm.driver}${settings.llm.model ? ` (${settings.llm.model})` : ''}.`
+    )
+  }
 
   log.info(
     `Parsed resume: ${parsed.experience.length} role(s), ${parsed.education.length} qualification(s), ${parsed.skills.length} skill(s)`

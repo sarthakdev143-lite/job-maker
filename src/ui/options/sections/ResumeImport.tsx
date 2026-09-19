@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useRef, useState } from 'react'
-import { api, useAction, type ResumeImportResult } from '../../shared/api'
+import { api, useAction, useWorkerEvents, type ResumeImportResult } from '../../shared/api'
 import { extractResumeText } from '../../shared/resume-file'
 import { Badge, TextArea } from '../../shared/components'
 import type { Profile } from '@/storage/schemas'
@@ -35,6 +35,9 @@ export default function ResumeImport({
   const [status, setStatus] = useState('')
   const [result, setResult] = useState<ResumeImportResult | null>(null)
   const { run, busy, error, clearError } = useAction()
+  // A resume parse is a multi-minute model call. Without this the page shows a
+  // frozen "Reading your resume..." and gives no way to tell work from a hang.
+  const { activity } = useWorkerEvents(['evt:activity'])
   const inputRef = useRef<HTMLInputElement>(null)
 
   const hasProfile = Boolean(profile.firstName || profile.experience.length > 0)
@@ -187,8 +190,15 @@ export default function ResumeImport({
           <div className="mt-3">
             <div className="h-[3px] w-full overflow-hidden rounded-full progress-indeterminate" style={{ background: 'var(--bg-soft)' }} />
             <p className="mt-1.5 text-[11.5px]" style={{ color: 'var(--ink-faint)' }}>
-              {status || 'Reading your resume…'} This takes about half a minute through the DeepSeek tab.
+              {status || 'Reading your resume…'} A model that answers quickly takes under a minute; on a
+              slow or unsuitable one this can run for several, so the line below is what proves it is
+              still working.
             </p>
+            {activity?.detail && (
+              <p className="mono mt-1 text-[11.5px]" style={{ color: 'var(--ink-faint)' }}>
+                {activity.detail}
+              </p>
+            )}
           </div>
         )}
 
