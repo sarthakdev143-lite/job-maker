@@ -176,10 +176,33 @@ export function isRequired(el: HTMLElement, label: string): boolean {
   return false
 }
 
+/**
+ * Is this plain-looking input actually the visible half of a custom dropdown?
+ *
+ * react-select and every widget shaped like it render a real `<input type=
+ * "text">` and keep the chosen value somewhere else entirely, so writing into
+ * the input sets a value the widget does not read and then wipes on blur.
+ * Greenhouse builds Country, Location, the sponsorship question and every EEO
+ * field this way: on a live form those are six controls, three of them
+ * mandatory, that looked like text boxes and silently refused every value.
+ *
+ * `role="combobox"` is the decisive signal, with the ARIA autocomplete pair as
+ * a fallback for widgets that set one but not the other.
+ */
+function looksLikeCombobox(el: HTMLElement): boolean {
+  if (attr(el, 'role') === 'combobox') return true
+  const auto = attr(el, 'aria-autocomplete')
+  if (auto === 'list' || auto === 'both') return true
+  return attr(el, 'aria-haspopup') === 'listbox' && el.hasAttribute('aria-expanded')
+}
+
 function kindOf(el: HTMLElement): FieldKind {
   if (el instanceof HTMLTextAreaElement) return 'textarea'
   if (el instanceof HTMLSelectElement) return 'select'
   if (el instanceof HTMLInputElement) {
+    // Checked and file inputs are never dropdowns; everything else might be.
+    const fixed = el.type === 'radio' || el.type === 'checkbox' || el.type === 'file'
+    if (!fixed && looksLikeCombobox(el)) return 'combobox'
     switch (el.type) {
       case 'email':
         return 'email'

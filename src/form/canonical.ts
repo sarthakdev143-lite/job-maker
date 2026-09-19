@@ -214,8 +214,19 @@ export function answerCanonical(
       return v(profile.addressLine1)
     case 'addressLine2':
       return v(profile.addressLine2, 0.9)
-    case 'city':
+    case 'city': {
+      // A bare city name is dangerous in a location typeahead. Asked for
+      // "Indore" the widget offered "Indore, United States" first, and a real
+      // application went out claiming the wrong country. Qualify the city with
+      // whatever region is known so the suggestion that matches is the right
+      // one; a plain text field simply receives a fuller, still-true answer.
+      if (!profile.city.trim()) return v('')
+      if (field.kind === 'combobox' || field.kind === 'select') {
+        const qualified = [profile.city, profile.state, profile.country].map((p) => p.trim()).filter(Boolean)
+        return v(qualified.join(', '))
+      }
       return v(profile.city)
+    }
     case 'state':
       return v(matchOption(field, profile.state))
     case 'postalCode':
