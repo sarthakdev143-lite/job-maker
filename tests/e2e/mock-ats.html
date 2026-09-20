@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Job Application for Backend Engineer at MockCo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #111; }
+  label { display: block; margin: 18px 0 4px; font-weight: 600; }
+  input[type=text], input[type=email], input[type=tel], textarea { width: 100%; padding: 8px; border: 1px solid #bbb; border-radius: 4px; font: inherit; }
+  .select__control { border: 1px solid #bbb; border-radius: 4px; padding: 6px 8px; display: flex; min-height: 38px; align-items: center; }
+  .select__input { border: 0; outline: 0; font: inherit; flex: 1; min-width: 40px; }
+  .select__menu { border: 1px solid #ddd; border-radius: 4px; margin-top: 2px; max-height: 220px; overflow: auto; }
+  .select__option { padding: 8px; cursor: pointer; }
+  .select__option:hover { background: #eef; }
+  .select__single-value { margin-right: 6px; }
+  button { margin-top: 24px; padding: 10px 18px; font: inherit; border: 0; border-radius: 4px; background: #2563eb; color: #fff; cursor: pointer; }
+  .field_with_errors { color: #b91c1c; font-size: 13px; margin-top: 4px; }
+  .step { display: block; }
+  .progress { color: #666; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>Backend Engineer</h1>
+<p class="progress">MockCo &middot; Bengaluru, India &middot; Step <span id="stepno">1</span> of 3</p>
+
+<form id="application_form" novalidate>
+  <!-- Step 1: contact details, with a react-select style country picker -->
+  <div class="step" data-step="1">
+    <label for="first_name">First Name <span aria-hidden="true">*</span></label>
+    <input id="first_name" name="first_name" type="text" aria-required="true" />
+    <div class="field_with_errors" id="err_first_name" hidden></div>
+
+    <label for="last_name">Last Name *</label>
+    <input id="last_name" name="last_name" type="text" aria-required="true" />
+    <div class="field_with_errors" id="err_last_name" hidden></div>
+
+    <label for="email">Email *</label>
+    <input id="email" name="email" type="email" aria-required="true" />
+    <div class="field_with_errors" id="err_email" hidden></div>
+
+    <label for="phone">Phone *</label>
+    <input id="phone" name="phone" type="tel" aria-required="true" />
+    <div class="field_with_errors" id="err_phone" hidden></div>
+
+    <label id="country-label" for="country">Country *</label>
+    <div class="select__control" id="country-control">
+      <div class="select__value-container" id="country-value"></div>
+      <div class="select__input-container">
+        <input id="country" class="select__input" type="text" role="combobox"
+               aria-autocomplete="list" aria-expanded="false" aria-haspopup="true"
+               aria-labelledby="country-label" aria-required="true" autocomplete="off" />
+      </div>
+    </div>
+    <div class="select__menu" id="country-menu"></div>
+    <div class="field_with_errors" id="err_country" hidden></div>
+
+    <button type="button" class="continue" data-next="2">Continue</button>
+  </div>
+
+  <!-- Step 2: documents -->
+  <div class="step" data-step="2">
+    <label for="resume">Attach your resume *</label>
+    <input id="resume" name="resume" type="file" aria-required="true" accept=".pdf,.doc,.docx" />
+    <div class="field_with_errors" id="err_resume" hidden></div>
+
+    <label for="cover_letter_text">Cover letter</label>
+    <textarea id="cover_letter_text" name="cover_letter_text" rows="6"></textarea>
+
+    <button type="button" class="continue" data-next="3">Next</button>
+  </div>
+
+  <!-- Step 3: screening questions and the real submit -->
+  <div class="step" data-step="3">
+    <label for="years">How many years of backend experience do you have? *</label>
+    <input id="years" name="years" type="text" aria-required="true" />
+    <div class="field_with_errors" id="err_years" hidden></div>
+
+    <label for="sponsorship">Do you now or will you in the future require sponsorship? *</label>
+    <select id="sponsorship" name="sponsorship" aria-required="true">
+      <option value="">Select...</option>
+      <option value="No">No</option>
+      <option value="Yes">Yes</option>
+    </select>
+    <div class="field_with_errors" id="err_sponsorship" hidden></div>
+
+    <label for="ack" style="font-weight:400">
+      <input id="ack" name="ack" type="checkbox" aria-required="true" />
+      I confirm the information above is accurate.
+    </label>
+    <div class="field_with_errors" id="err_ack" hidden></div>
+
+    <button type="submit" id="submit_app">Submit application</button>
+  </div>
+</form>
+
+<div id="application_confirmation" hidden>
+  <h2>Thanks for applying</h2>
+  <p>Your application has been submitted. We will be in touch.</p>
+</div>
+
+<script>
+// ---- a react-select lookalike for Country -------------------------------
+const COUNTRIES = ['India', 'Indonesia', 'Ireland', 'Israel', 'Italy', 'United Kingdom', 'United States']
+const cInput = document.getElementById('country')
+const cMenu = document.getElementById('country-menu')
+const cValue = document.getElementById('country-value')
+let chosenCountry = ''
+
+function renderMenu() {
+  const q = cInput.value.toLowerCase()
+  cMenu.innerHTML = ''
+  for (const name of COUNTRIES.filter((c) => c.toLowerCase().includes(q))) {
+    const opt = document.createElement('div')
+    opt.className = 'select__option'
+    opt.setAttribute('role', 'option')
+    opt.setAttribute('tabindex', '-1')
+    opt.textContent = name
+    opt.addEventListener('mousedown', () => {
+      chosenCountry = name
+      cInput.value = ''
+      cMenu.innerHTML = ''
+      cInput.setAttribute('aria-expanded', 'false')
+      cValue.innerHTML = '<div class="select__single-value">' + name + '</div>'
+    })
+    cMenu.appendChild(opt)
+  }
+}
+document.getElementById('country-control').addEventListener('mousedown', () => {
+  cInput.setAttribute('aria-expanded', 'true')
+  renderMenu()
+})
+cInput.addEventListener('input', renderMenu)
+cInput.addEventListener('blur', () => { cMenu.innerHTML = ''; cInput.setAttribute('aria-expanded', 'false') })
+
+// ---- wizard with real per-step validation -------------------------------
+const REQUIRED = {
+  1: [['first_name', 'First Name is required'], ['last_name', 'Last Name is required'],
+      ['email', 'Email is required'], ['phone', 'Phone is required'], ['country', 'Country is required']],
+  2: [['resume', 'Please attach your resume']],
+  3: [['years', 'This question is required'], ['sponsorship', 'This question is required'],
+      ['ack', 'You must confirm before submitting']],
+}
+
+function valueOf(id) {
+  if (id === 'country') return chosenCountry
+  const el = document.getElementById(id)
+  if (el.type === 'checkbox') return el.checked ? 'yes' : ''
+  if (el.type === 'file') return el.files && el.files.length ? el.files[0].name : ''
+  return el.value.trim()
+}
+
+function report(event, detail) {
+  try { fetch('/log', { method: 'POST', keepalive: true, body: JSON.stringify({ event, detail, t: Date.now() }) }) } catch (e) {}
+}
+// Every event that reaches a step button, so a click that never lands is
+// distinguishable from one that lands and is refused.
+for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+  document.addEventListener(type, (e) => {
+    const b = e.target && e.target.closest ? e.target.closest('button') : null
+    if (b) report('button-' + type, { text: (b.innerText || '').trim().slice(0, 20), step: b.closest('.step')?.dataset.step })
+  }, true)
+}
+document.getElementById('resume').addEventListener('change', (e) =>
+  report('resume-change', { files: e.target.files ? e.target.files.length : -1, name: e.target.files && e.target.files[0] ? e.target.files[0].name : '' }))
+
+// Does the page believe anyone is looking at it? The worker window is
+// minimized and unfocused, so without the page-world shim this reads
+// "hidden / false" -- see src/content/visibility-shim.ts.
+report('visibility', { visibilityState: document.visibilityState, hidden: document.hidden, hasFocus: document.hasFocus() })
+
+function validate(step) {
+  let ok = true
+  const failed = []
+  for (const [id, message] of REQUIRED[step]) {
+    const err = document.getElementById('err_' + id)
+    if (!valueOf(id)) { err.textContent = message; err.hidden = false; ok = false; failed.push(id) }
+    else { err.hidden = true; err.textContent = '' }
+  }
+  report('validate', { step, ok, failed })
+  return ok
+}
+
+const STEPS = new Map()
+for (const s of document.querySelectorAll('.step')) STEPS.set(s.dataset.step, s)
+
+function show(step) {
+  const form = document.getElementById('application_form')
+  for (const [key, node] of STEPS) {
+    if (key === String(step)) { if (!node.isConnected) form.appendChild(node) }
+    else if (node.isConnected) node.remove()
+  }
+  document.getElementById('stepno').textContent = String(step)
+  window.scrollTo(0, 0)
+}
+// Start on step one with the later pages genuinely absent from the document.
+show(1)
+
+// Delegated, because later steps are not in the document when this runs.
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('.continue') : null
+  if (!btn) return
+  const current = Number(btn.closest('.step').dataset.step)
+  // The page decides, exactly as a real one does: no advance while blank.
+  if (validate(current)) show(Number(btn.dataset.next))
+})
+
+document.getElementById('application_form').addEventListener('submit', (e) => {
+  e.preventDefault()
+  if (!validate(3)) return
+  document.getElementById('application_form').hidden = true
+  document.querySelector('.progress').hidden = true
+  document.getElementById('application_confirmation').hidden = false
+  // Record what was received, so the test can assert on the real values.
+  report('SUBMITTED', {
+    first_name: valueOf('first_name'), last_name: valueOf('last_name'), email: valueOf('email'),
+    phone: valueOf('phone'), country: chosenCountry, resume: valueOf('resume'),
+    cover_letter: document.getElementById('cover_letter_text') ? document.getElementById('cover_letter_text').value.slice(0, 60) : '',
+    years: valueOf('years'), sponsorship: valueOf('sponsorship'), ack: valueOf('ack'),
+  })
+  window.__submitted = {
+    first_name: valueOf('first_name'), last_name: valueOf('last_name'), email: valueOf('email'),
+    phone: valueOf('phone'), country: chosenCountry, resume: valueOf('resume'),
+    cover_letter: document.getElementById('cover_letter_text').value.slice(0, 120),
+    years: valueOf('years'), sponsorship: valueOf('sponsorship'), ack: valueOf('ack'),
+  }
+})
+</script>
+</body>
+</html>
