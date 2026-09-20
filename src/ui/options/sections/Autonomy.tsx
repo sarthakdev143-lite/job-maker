@@ -224,7 +224,22 @@ export default function AutonomySection({
               step={5000}
             />
           </Field>
+          <Field
+            label="Give up on one application after (ms)"
+            hint="A hard ceiling. Past this the job is abandoned and the run moves on, so one stalled model call cannot own the whole night."
+          >
+            <NumberInput
+              value={a.maxApplicationMs}
+              onChange={(v) => set({ maxApplicationMs: v })}
+              min={60000}
+              step={30000}
+            />
+          </Field>
         </div>
+        <p className="hint mt-2">
+          The pause between applications is the throughput ceiling: at 45-180s it is roughly 20-80
+          applications a day. Lower it if you want volume, raise it if a site starts challenging you.
+        </p>
       </Section>
 
       <Section title="Scheduling and alerts">

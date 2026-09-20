@@ -19,6 +19,7 @@ import DocumentsSection from './sections/Documents'
 import PromptsSection from './sections/Prompts'
 import AnswersSection from './sections/Answers'
 import AdvancedSection from './sections/Advanced'
+import DiagnosticsSection from './sections/Diagnostics'
 import type { Profile, Settings } from '@/storage/schemas'
 
 const NAV = [
@@ -30,6 +31,7 @@ const NAV = [
   { id: 'documents', label: 'Documents', hint: 'Resume and cover letter' },
   { id: 'prompts', label: 'Prompts', hint: 'What it is told to do' },
   { id: 'answers', label: 'Answer bank', hint: 'What it has learned' },
+  { id: 'diagnostics', label: 'Diagnostics', hint: 'What broke, and why' },
   { id: 'advanced', label: 'Advanced', hint: 'Domains, backup, reset' },
 ] as const
 
@@ -197,6 +199,7 @@ export default function App() {
         {section === 'documents' && <DocumentsSection settings={settings} patch={patchSettings} />}
         {section === 'prompts' && <PromptsSection settings={settings} patch={patchSettings} />}
         {section === 'answers' && <AnswersSection />}
+        {section === 'diagnostics' && <DiagnosticsSection />}
         {section === 'advanced' && <AdvancedSection settings={settings} patch={patchSettings} />}
 
         <div className="h-16" />

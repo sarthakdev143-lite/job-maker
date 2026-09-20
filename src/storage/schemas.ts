@@ -141,7 +141,19 @@ export const MatchRulesSchema = z.object({
   companyAllowlist: z.array(z.string()).default([]),
   locations: z.array(z.string()).default([]),
   workModes: z.array(WorkModeSchema).default(['remote', 'hybrid', 'onsite', 'unknown']),
-  seniority: z.array(SenioritySchema).default(['junior', 'mid', 'senior', 'unknown']),
+  /**
+   * Levels worth applying to, by default everything below management.
+   *
+   * 'staff' and 'lead' used to be missing, which silently rejected the exact
+   * titles an experienced engineer or architect should be seeing: a thirteen
+   * year principal architect ran a full sweep and had every single result
+   * thrown away with "seniority staff excluded" before it was ever scored.
+   * Management levels stay out of the default because wanting to stay
+   * hands-on is the more common case, not because they are worse roles.
+   */
+  seniority: z
+    .array(SenioritySchema)
+    .default(['junior', 'mid', 'senior', 'staff', 'lead', 'unknown']),
   minSalary: z.number().nullable().default(null),
   salaryCurrency: z.string().default('INR'),
   maxDaysOld: z.number().default(30),
@@ -245,6 +257,17 @@ export const AutonomySchema = z.object({
   delayBetweenApplicationsMs: z
     .object({ min: z.number().default(45000), max: z.number().default(180000) })
     .default({}),
+  /**
+   * Hard wall-clock ceiling on one application, in milliseconds.
+   *
+   * Without it a single model call could own the whole run: the request timeout
+   * is three minutes and it is retried twice, then failed over to a second
+   * driver, so one unlucky job could sit silent for a quarter of an hour while
+   * the agent looked frozen. Five minutes is generous for a form that is going
+   * to work and short enough that a job which is not going to work gets out of
+   * the way.
+   */
+  maxApplicationMs: z.number().default(300000),
   /** Halt the whole run after this many consecutive failures. */
   circuitBreakerFailures: z.number().default(3),
   notifyOnSubmit: z.boolean().default(true),
@@ -267,6 +290,16 @@ export const LlmConfigSchema = z.object({
   maxRetries: z.number().default(2),
   /** Start a fresh DeepSeek conversation every N requests to bound context. */
   newChatEveryNRequests: z.number().default(8),
+  /**
+   * Minimum gap between two prompts on the DeepSeek web driver.
+   *
+   * The consumer chat product is sized for a person typing, not for a loop.
+   * Pacing requests keeps the load we put on it modest, which is both the
+   * polite thing to do and what keeps an account in good standing. The
+   * supported way to run at speed is DeepSeek's paid API (the
+   * "openai-compatible" driver), not a faster scraper.
+   */
+  minRequestGapMs: z.number().default(5000),
 })
 
 export type LlmConfig = z.infer<typeof LlmConfigSchema>

@@ -15,15 +15,17 @@ import { byCheapestFirst, runDiscovery, unscoredJobs } from '@/discovery'
 import { getRecipes } from '@/storage/settings'
 import { scoreJob } from '@/matching/scorer'
 import { applyToJob } from '@/runner/apply-machine'
+import { PermissionError } from '@/shared/injection'
 import { dailyCounterKey, withinActiveWindow } from '@/runner/autonomy-gate'
 import { applicationsRepo, jobsRepo, logsRepo } from '@/storage/db'
 import { getCounter, getProfile, getSettings, profileIsUsable, pruneCounters } from '@/storage/settings'
 import { llm } from '@/llm/broker'
 import { createLogger } from '@/shared/logger'
-import { dayKey, errorMessage, jitter } from '@/shared/util'
+import { dayKey, errorMessage } from '@/shared/util'
+import { nextGap } from '@/human/pacing'
 import { durableSleep, startHeartbeat, type Heartbeat } from '@/shared/keepalive'
 import { closeAllWorkerWindows } from '@/shared/windows'
-import { beat, clearRunState, loadBreakerCount, loadRunState, looksInterrupted, saveBreakerCount, saveRunState } from './run-state'
+import { beat, clearRunState, isHalted, loadBreakerCount, loadRunState, looksInterrupted, saveBreakerCount, saveRunState, setHalted } from './run-state'
 import {
   emptySummary,
   saveCycleSummary,
@@ -76,7 +78,7 @@ export type PreflightCheck = {
   ok: boolean
   detail: string
   /** Which settings section fixes it, for a jump link in the UI. */
-  fix?: 'profile' | 'searches' | 'matching' | 'model' | 'autonomy'
+  fix?: 'profile' | 'searches' | 'matching' | 'model' | 'autonomy' | 'advanced'
   /** A failing blocker refuses to start; a failing warning only explains. */
   blocking: boolean
 }
@@ -129,6 +131,14 @@ class Orchestrator {
    * once, each opening windows, and neither finishing cleanly.
    */
   private loopActive = false
+  /**
+   * Applications attempted since this run started.
+   *
+   * Feeds the fatigue curve: a person applying for jobs all afternoon slows
+   * down, and a gap distribution that is as brisk at application two hundred as
+   * at application one is a pattern of its own.
+   */
+  private appliedThisSession = 0
 
   constructor() {
     // Every change to what the agent is doing -- including the fine-grained
@@ -263,6 +273,25 @@ class Orchestrator {
       blocking: false,
     })
 
+    // Not blocking: the built-in boards work without it, and refusing to start
+    // over a permission most runs never need would be worse than the warning.
+    // It is here because a run that hits an ungranted site fails every single
+    // application with the same unreadable connection error, and nothing in the
+    // UI previously connected that to a grant the user can make in one click.
+    const allSites = await chrome.permissions
+      .contains({ origins: ['https://*/*'] })
+      .catch(() => true)
+    checks.push({
+      id: 'siteAccess',
+      label: 'The agent can reach company-hosted forms',
+      ok: allSites,
+      detail: allSites
+        ? 'Granted for all sites'
+        : 'Only the built-in job boards. Applications on a company-hosted careers page will fail until you grant access in Settings -> Advanced -> Site access.',
+      fix: 'advanced',
+      blocking: false,
+    })
+
     checks.push({
       id: 'mode',
       label: 'Autonomy mode',
@@ -287,6 +316,11 @@ class Orchestrator {
   async start(): Promise<AgentState> {
     if (this.state.running || this.loopActive) return this.getState()
     this.loopActive = true
+
+    // Pressing Start is the only thing that lifts a kill switch. Clearing it
+    // anywhere else -- on a resume, on a worker restart, on the cycle alarm --
+    // is what made Stop last five minutes.
+    await setHalted(false)
 
     const settings = await getSettings()
     const checks = await this.preflight()
@@ -324,6 +358,10 @@ class Orchestrator {
   async stop(): Promise<AgentState> {
     this.stopRequested = true
     this.loopActive = false
+    // Sticky, exactly as for the kill switch: this is the button the user
+    // actually presses, and without the flag the cycle alarm restarted the run
+    // five minutes later as if Stop had never happened.
+    await setHalted(true)
     await saveBreakerCount(0)
     this.patch({ phase: 'stopped' })
     activity.begin('stopped', 'Stopping after the current step')
@@ -343,12 +381,18 @@ class Orchestrator {
     this.stopRequested = true
     this.loopActive = false
     this.endHeartbeat()
+    await setHalted(true)
     await clearRunState()
     this.patch({ running: false, phase: 'stopped', currentJobId: '' })
     activity.end('Halted by the kill switch')
     log.warn('Kill switch engaged')
     await this.reapOrphanWindows()
     return this.getState()
+  }
+
+  /** Has a person pressed Stop and not pressed Start since? */
+  async halted(): Promise<boolean> {
+    return isHalted()
   }
 
   /**
@@ -403,9 +447,10 @@ class Orchestrator {
     }
 
     const settings = await getSettings()
-    if (!settings.autonomy.enabled) {
-      // The user switched autonomy off while the worker was away. Honour that
-      // rather than resurrecting a run they have already called off.
+    if (!settings.autonomy.enabled || (await isHalted())) {
+      // The user switched autonomy off, or pressed Stop, while the worker was
+      // away. Honour that rather than resurrecting a run they have already
+      // called off.
       this.loopActive = false
       await clearRunState()
       return false
@@ -519,19 +564,16 @@ class Orchestrator {
         return
       }
 
-      // --- discover ------------------------------------------------------
-      this.patch({ phase: 'discovering' })
-      activity.begin('discovering', 'Searching job boards', 120_000)
-      const discovery = await runDiscovery({ shouldStop: this.shouldStop })
-      tally.found = discovery.stored
-      tally.duplicates = discovery.duplicates
-      tally.rejected = discovery.rejected
-      tally.blocked = discovery.blocked
-      tally.perRecipe = discovery.byRecipe
-      log.info(
-        `Discovery: ${discovery.stored} new, ${discovery.duplicates} duplicate, ${discovery.rejected} filtered out` +
-          (discovery.blocked > 0 ? `, ${discovery.blocked} recipe(s) blocked` : '')
-      )
+      // --- apply what is already queued ------------------------------------
+      //
+      // First, not last. Discovery used to open the cycle unconditionally: it
+      // opens a window per search URL, scrolls it and closes it again, which is
+      // minutes of visible noise, and a queue of jobs sat untouched behind it
+      // every single cycle. The agent's job is to apply; searching is only how
+      // the queue gets refilled once it runs dry.
+      const standingQueue = await this.applyQueue()
+      for (const r of standingQueue) this.countApplyResult(tally, r.result, r.gateReasons)
+
       if (this.shouldStop()) {
         stoppedEarly = true
         return
@@ -627,9 +669,31 @@ class Orchestrator {
         return
       }
 
-      // --- anything queued by an earlier cycle -----------------------------
-      const queueResults = await this.applyQueue()
-      for (const r of queueResults) this.countApplyResult(tally, r.result, r.gateReasons)
+      // --- refill the queue, only once there is nothing left to apply -------
+      //
+      // Deliberately the last thing a cycle does. If jobs are still queued the
+      // agent has work in hand and another sweep would only add to a backlog it
+      // is not getting through -- which is exactly what "it just opens Indeed,
+      // scrolls and closes it" looked like from the outside.
+      const stillQueued = (await jobsRepo.byStatus('queued', 5)).length
+      const stillUnscored = (await unscoredJobs(1)).length
+
+      if (stillQueued > 0 || stillUnscored > 0) {
+        log.info(`Skipping search: ${stillQueued} job(s) still queued and ${stillUnscored} unscored`)
+      } else {
+        this.patch({ phase: 'discovering' })
+        activity.begin('discovering', 'Queue is empty - searching job boards', 120_000)
+        const discovery = await runDiscovery({ shouldStop: this.shouldStop })
+        tally.found = discovery.stored
+        tally.duplicates = discovery.duplicates
+        tally.rejected = discovery.rejected
+        tally.blocked = discovery.blocked
+        tally.perRecipe = discovery.byRecipe
+        log.info(
+          `Discovery: ${discovery.stored} new, ${discovery.duplicates} duplicate, ${discovery.rejected} filtered out` +
+            (discovery.blocked > 0 ? `, ${discovery.blocked} recipe(s) blocked` : '')
+        )
+      }
     } catch (e) {
       const message = errorMessage(e)
       this.patch({ phase: 'error', lastError: message })
@@ -742,12 +806,35 @@ class Orchestrator {
     let result: ApplyAttempt = 'failed'
     let gateReasons: string[] = []
     try {
-      const outcome = await applyToJob(job.id, {
-        shouldStop: this.shouldStop,
-        ignoreActiveHours: this.manualRun,
-        // The step notes reach the panel through `activity`; this only keeps the
-        // job id current so the UI can link to what is being worked on.
-        onStep: () => this.patch({ currentJobId: job.id }),
+      // A hard ceiling, not a polled one. `shouldStop` is only read between
+      // steps, so a job blocked inside a three-minute model call that is
+      // retried twice and then failed over never reaches a checkpoint -- which
+      // is what "stuck for fifteen minutes with no log line" was.
+      const budgetMs = Math.max(60_000, settings.autonomy.maxApplicationMs)
+      let budgetTimer: ReturnType<typeof setTimeout> | undefined
+      const outcome = await Promise.race([
+        applyToJob(job.id, {
+          shouldStop: this.shouldStop,
+          ignoreActiveHours: this.manualRun,
+          // The step notes reach the panel through `activity`; this only keeps the
+          // job id current so the UI can link to what is being worked on.
+          onStep: () => this.patch({ currentJobId: job.id }),
+        }),
+        new Promise<never>((_, reject) => {
+          budgetTimer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `Gave up after ${Math.round(budgetMs / 1000)}s on this application. ` +
+                    `Usually a model call that is timing out and retrying; lower the request ` +
+                    `timeout or retries in Settings -> Model, or raise this budget in Autonomy.`
+                )
+              ),
+            budgetMs
+          )
+        }),
+      ]).finally(() => {
+        if (budgetTimer !== undefined) clearTimeout(budgetTimer)
       })
 
       if (outcome.submitted) {
@@ -776,6 +863,19 @@ class Orchestrator {
         return { carryOn: false, result, gateReasons }
       }
     } catch (e) {
+      // Chrome refusing the site is a standing condition, not a bad job. Every
+      // remaining application would fail identically, so stop and say what to
+      // click -- a queue of a hundred identical connection errors is how this
+      // looked like a broken extension rather than a missing permission.
+      if (e instanceof PermissionError) {
+        const message = errorMessage(e)
+        log.error(message)
+        this.patch({ phase: 'error', lastError: message, running: false })
+        this.stopRequested = true
+        activity.end('Stopped: no access to the job site')
+        await clearRunState()
+        return { carryOn: false, result: 'skipped', gateReasons: [message] }
+      }
       this.consecutiveFailures++
       await saveBreakerCount(this.consecutiveFailures)
       log.error(`Unexpected failure on ${job.title}`, { error: errorMessage(e) }, job.id)
@@ -787,11 +887,18 @@ class Orchestrator {
     // Chunked rather than one long sleep: a plain setTimeout of up to three
     // minutes is exactly the idle stretch Chrome evicts the worker during, and
     // the run would never wake from it.
-    const gap = jitter(
-      settings.autonomy.delayBetweenApplicationsMs.min,
-      settings.autonomy.delayBetweenApplicationsMs.max
-    )
-    await durableSleep(gap, { shouldStop: this.shouldStop })
+    this.appliedThisSession++
+    const gap = nextGap(settings.autonomy.delayBetweenApplicationsMs, {
+      sessionMs: Date.now() - (this.state.startedAt ?? Date.now()),
+      completed: this.appliedThisSession,
+    })
+    // Said out loud. This wait is up to three minutes by default and used to
+    // leave the last application's message on screen the whole time, which is
+    // indistinguishable from a hang -- and it is the single most common reason
+    // a working agent looked stuck.
+    activity.begin('paused', gap.reason, gap.ms + 10_000)
+    if (gap.isBreak) log.info(gap.reason)
+    await durableSleep(gap.ms, { shouldStop: this.shouldStop })
     return { carryOn: true, result, gateReasons }
   }
 

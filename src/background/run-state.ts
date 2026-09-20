@@ -119,3 +119,35 @@ export async function saveBreakerCount(count: number): Promise<void> {
     log.debug(`Could not persist breaker count: ${(e as Error).message}`)
   }
 }
+
+const HALT_KEY = 'agent:haltedAt'
+
+/**
+ * The kill switch, remembered outside the worker.
+ *
+ * Pressing Stop used to clear the run flag and close the windows, and five
+ * minutes later the cycle alarm woke, saw nothing running, and started a fresh
+ * run. From the outside the agent ignored the stop button: windows reappeared,
+ * applications resumed, and the only way out was turning autonomy off entirely.
+ *
+ * A halt is therefore sticky. It is written when a person presses Stop and
+ * cleared only by a person pressing Start -- never by an alarm, a resume, or a
+ * worker restart, all of which are exactly the things that used to undo it.
+ */
+export async function setHalted(halted: boolean): Promise<void> {
+  try {
+    if (halted) await chrome.storage.local.set({ [HALT_KEY]: Date.now() })
+    else await chrome.storage.local.remove(HALT_KEY)
+  } catch (e) {
+    log.debug(`Could not persist halt flag: ${(e as Error).message}`)
+  }
+}
+
+export async function isHalted(): Promise<boolean> {
+  try {
+    const stored = await chrome.storage.local.get(HALT_KEY)
+    return typeof stored?.[HALT_KEY] === 'number'
+  } catch {
+    return false
+  }
+}

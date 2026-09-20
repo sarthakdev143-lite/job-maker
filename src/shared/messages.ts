@@ -9,6 +9,7 @@
  */
 
 import type { ActivityStep } from './activity'
+import type { PageOutline } from '@/form/outline'
 import type {
   Application,
   FieldDescriptor,
@@ -49,6 +50,16 @@ export type UiRequest =
   | { type: 'ui:stopAgent' }
   | { type: 'ui:killSwitch' }
   | { type: 'ui:testLlm'; prompt?: string }
+  | { type: 'ui:listModels' }
+  | { type: 'ui:cancelModelQueue' }
+  /** Page snapshots kept when an application failed; see storage/evidence.ts. */
+  | { type: 'ui:listEvidence' }
+  | { type: 'ui:clearEvidence' }
+  /** Apply controls learned per host; see storage/site-memory.ts. */
+  | { type: 'ui:listSiteMemory' }
+  | { type: 'ui:clearSiteMemory' }
+  /** Run the extension's own diagnostics; see background/self-test.ts. */
+  | { type: 'ui:selfTest'; probePages?: boolean; probeCount?: number; probeUrl?: string }
   | { type: 'ui:llmHealth' }
   | { type: 'ui:openLlmLogin' }
   | { type: 'ui:listAnswers'; query?: string }
@@ -101,11 +112,17 @@ export type FormRequest =
   | { type: 'form:verifySubmission' }
   | { type: 'form:advanceStep' }
   | { type: 'form:snapshot' }
+  /** A model-readable description of the rendered page; see form/outline.ts. */
+  | { type: 'form:outline' }
+  /** Click one specific control, used for a target the model picked. */
+  | { type: 'form:click'; selector: string }
   | { type: 'form:highlight'; selectors: string[] }
 
 export type FormDetectResult = {
   vendor: string
   isApplicationForm: boolean
+  /** True when pressing the entry button submits outright; see DetectResult. */
+  entrySubmitsImmediately?: boolean
   jobTitle: string
   company: string
   confidence: number
@@ -149,6 +166,8 @@ export type FormResponse =
   | { ok: true; type: 'form:verifySubmission'; result: FormVerifyResult }
   | { ok: true; type: 'form:advanceStep'; advanced: boolean; detail: string }
   | { ok: true; type: 'form:snapshot'; html: string; text: string }
+  | { ok: true; type: 'form:outline'; outline: PageOutline }
+  | { ok: true; type: 'form:click'; clicked: boolean; detail: string }
   | { ok: true; type: 'form:highlight' }
   | { ok: false; error: string }
 
@@ -184,6 +203,7 @@ export type AgentState = {
 export type BroadcastEvent =
   | { type: 'evt:state'; state: AgentState }
   | { type: 'evt:log'; level: 'debug' | 'info' | 'warn' | 'error'; scope: string; message: string; at: number }
+  | { type: 'evt:activity'; label: string; detail: string; at: number }
   | { type: 'evt:jobs' }
   | { type: 'evt:applications' }
 
@@ -204,10 +224,37 @@ export function err(error: string): Err {
 }
 
 /** Typed wrapper around chrome.runtime.sendMessage for UI surfaces. */
+/**
+ * Ceiling on how long any UI call waits for the worker.
+ *
+ * Generous, because a real model request legitimately runs for minutes and
+ * cutting one off early would be worse than waiting. The point is only that a
+ * worker which died without answering cannot leave a button reading "Asking..."
+ * for the rest of the session -- chrome.runtime.sendMessage does not always
+ * reject when its port dies, and an un-settled promise is indistinguishable
+ * from a frozen extension.
+ */
+const WORKER_REPLY_TIMEOUT_MS = 10 * 60 * 1000
+
 export async function sendToWorker<T = unknown>(msg: UiRequest): Promise<T> {
   let res: Result<T> | undefined
   try {
-    res = (await chrome.runtime.sendMessage(msg)) as Result<T> | undefined
+    res = (await Promise.race([
+      chrome.runtime.sendMessage(msg) as Promise<Result<T> | undefined>,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `The background worker did not answer "${msg.type}" within 10 minutes. ` +
+                  'Open chrome://extensions and press Reload on this extension. ' +
+                  'If a model request was running, check Settings -> Model and lower the request timeout.'
+              )
+            ),
+          WORKER_REPLY_TIMEOUT_MS
+        )
+      ),
+    ])) as Result<T> | undefined
   } catch (e) {
     throw new Error(explainWorkerError((e as Error).message))
   }

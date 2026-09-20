@@ -17,6 +17,7 @@ import { setUpSearchesFromProfile } from '@/discovery/setup'
 import { startAutopilot } from './autopilot'
 import { applyToJob, dryRunUrl, submitApprovedApplication } from '@/runner/apply-machine'
 import { llm } from '@/llm/broker'
+import { extractJsonCandidate, repairJson } from '@/llm/structured'
 import { answersRepo, applicationsRepo, dbStats, docsRepo, jobsRepo, logsRepo } from '@/storage/db'
 import { list as listAnswers, remember, remove as removeAnswer, seedFromProfile } from '@/storage/answer-bank'
 import {
@@ -38,6 +39,9 @@ import { getLastSummary, getRecentSummaries, getRecipeHealth } from './run-histo
 import { err, ok, type BroadcastEvent, type UiRequest } from '@/shared/messages'
 import { errorMessage } from '@/shared/util'
 import { formAgentFiles } from '@/shared/injection'
+import { allEvidence, clearEvidence } from '@/storage/evidence'
+import { allSiteMemory, clearSiteMemory } from '@/storage/site-memory'
+import { runSelfTest } from './self-test'
 import { activity } from '@/shared/activity'
 import { BUILD_ID } from '@/shared/build'
 import { startHeartbeat } from '@/shared/keepalive'
@@ -61,6 +65,15 @@ setLogBroadcaster((level, scope, message, at) => {
 })
 
 orchestrator.onStateChange((state) => broadcast({ type: 'evt:state', state }))
+
+// The activity tracker knows what is blocking right now -- "asking the model",
+// "model is replying (412 characters)" -- and nothing was listening to it, so
+// every multi-minute operation presented to the user as a motionless screen.
+// A connection test on the shipped defaults could run for nine minutes with no
+// sign of life, which is indistinguishable from a hang.
+activity.onChange((step) =>
+  broadcast({ type: 'evt:activity', label: step.label, detail: step.detail, at: step.updatedAt })
+)
 
 /* --------------------------------------------------------------- router */
 
@@ -207,9 +220,75 @@ async function route(msg: UiRequest): Promise<unknown> {
       const prompt =
         msg.prompt ??
         'Reply with a single fenced json block containing exactly {"ok": true, "engine": "<the model name you are>"} and nothing else.'
-      const text = await llm.completeText({ prompt, freshContext: true }, 'connection test')
-      return { reply: text.slice(0, 2000) }
+      // A diagnostic has to fail fast or it is not a diagnostic. On the shipped
+      // defaults -- a 180s request timeout and two transport retries -- this
+      // took up to nine minutes to report a bad model, which is
+      // indistinguishable from the extension being frozen. One attempt, 45
+      // seconds, no failover: the question being asked is whether THIS driver
+      // works, not whether some fallback could rescue it.
+      const queuedBehind = llm.queueDepth
+      const startedAt = Date.now()
+      const text = await llm.completeText(
+        { prompt, freshContext: true, timeoutMs: 45000 },
+        'connection test',
+        { retries: 0, useFallback: false }
+      )
+      const elapsedMs = Date.now() - startedAt
+
+      // Reaching the model is not the thing worth testing. Every real call in
+      // this extension is completeStructured, which needs a parseable JSON
+      // object back — so a model that answers in prose passes a bytes-returned
+      // check and then silently produces empty profiles. Verify the contract
+      // the app actually depends on, and report it separately from the reply.
+      const candidate = extractJsonCandidate(text)
+      let jsonOk = false
+      let jsonDetail: string
+
+      if (!candidate) {
+        jsonDetail = 'The reply contained no JSON at all — this model cannot be used by the agent.'
+      } else {
+        try {
+          const value: unknown = JSON.parse(repairJson(candidate))
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            jsonOk = true
+            jsonDetail = 'Returned a valid JSON object — this model can drive the agent.'
+          } else {
+            jsonDetail = `Parsed, but as ${Array.isArray(value) ? 'an array' : typeof value} rather than an object.`
+          }
+        } catch (e) {
+          jsonDetail = `The JSON in the reply did not parse: ${(e as Error).message}`
+        }
+      }
+
+      return { reply: text.slice(0, 2000), jsonOk, jsonDetail, elapsedMs, queuedBehind }
     }
+
+    case 'ui:cancelModelQueue':
+      return { dropped: await llm.abortQueue() }
+
+    case 'ui:listModels':
+      return { models: await llm.listModels() }
+
+    case 'ui:listEvidence':
+      return { evidence: await allEvidence() }
+
+    case 'ui:clearEvidence':
+      await clearEvidence()
+      return { cleared: true }
+
+    case 'ui:listSiteMemory':
+      return { sites: await allSiteMemory() }
+
+    case 'ui:clearSiteMemory':
+      await clearSiteMemory()
+      return { cleared: true }
+
+    case 'ui:selfTest':
+      return runSelfTest({
+        probePages: msg.probePages,
+        probeCount: msg.probeCount,
+        probeUrl: msg.probeUrl,
+      })
 
     case 'ui:llmHealth':
       return llm.health(true)
@@ -392,7 +471,38 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   if (details.reason === 'install') {
     await chrome.tabs.create({ url: chrome.runtime.getURL('src/ui/options/index.html') })
   }
+
+  // Check ourselves on every reload, without being asked. The cheap checks
+  // only -- no model call, no tabs -- because this runs whether or not the user
+  // is looking, and the expensive ones belong behind a button. The point is
+  // that a broken permission or a missing alarm announces itself in the log at
+  // the moment it breaks, rather than being discovered an hour into a run that
+  // was never going to work.
+  void announceSelfTest()
 })
+
+/**
+ * Run the fast checks and say so in the log.
+ *
+ * Deliberately silent when everything is fine: a green line on every reload
+ * becomes noise, and noise is how a red line gets missed.
+ */
+async function announceSelfTest(): Promise<void> {
+  try {
+    const report = await runSelfTest({ probePages: false })
+    const problems = report.checks.filter((c) => c.status === 'fail' || c.status === 'warn')
+    if (problems.length === 0) return
+
+    for (const problem of problems) {
+      const line = `${problem.name}: ${problem.detail}${problem.fix ? ` -> ${problem.fix}` : ''}`
+      if (problem.status === 'fail') log.error(`Self-check: ${line}`)
+      else log.warn(`Self-check: ${line}`)
+    }
+    log.info('Self-check found something. Settings -> Diagnostics -> Run the self-test for the full report.')
+  } catch (e) {
+    log.debug(`Self-check could not run: ${errorMessage(e)}`)
+  }
+}
 
 chrome.runtime.onStartup.addListener(async () => {
   // The cycle alarm is the safety net under an evicted worker. It was created
@@ -411,6 +521,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === CYCLE_ALARM) {
     const settings = await getSettings()
     if (!settings.autonomy.enabled) return
+
+    // A kill switch has to outlive the next tick. Without this the alarm woke
+    // five minutes after Stop, saw nothing running, and started a fresh run --
+    // so the button appeared to do nothing but pause.
+    if (await orchestrator.halted()) {
+      log.debug('Scheduled cycle skipped: halted by the kill switch')
+      return
+    }
 
     // A run the worker was evicted out of takes priority: it already has a
     // queue and a heartbeat to restore, and starting a fresh one on top of it

@@ -11,6 +11,7 @@
 import { useState } from 'react'
 import { api, useAction } from '../../shared/api'
 import { Field, ListInput, Section, TextArea, TextInput } from '../../shared/components'
+import SiteAccessSection from './SiteAccess'
 import type { Settings } from '@/storage/schemas'
 
 export default function AdvancedSection({
@@ -42,9 +43,19 @@ export default function AdvancedSection({
             onClick={() =>
               run(async () => {
                 const result = await api.dryRunUrl(dryUrl.trim())
+                // Verified, not merely attempted. A dry run that cannot tell a
+                // filled form from one that refused every value answers the
+                // wrong question.
+                const stuck = result.plan.filter((f) => f.verified).length
                 setDryResult(
-                  `Found ${result.fields} field(s). Filled ${result.plan.length}. Could not answer ${result.unresolved.length}.\n\n` +
-                    result.plan.map((f) => `${f.label || f.selector}\n  = ${f.value}  [${f.source}, ${Math.round(f.confidence * 100)}%]`).join('\n')
+                  `Found ${result.fields} field(s). Wrote ${result.plan.length}, ${stuck} verified. Could not answer ${result.unresolved.length}.\n\n` +
+                    result.plan
+                      .map(
+                        (f) =>
+                          `${f.verified ? 'OK' : 'XX'} ${f.label || f.selector}\n  = ${f.value}  [${f.source}, ${Math.round(f.confidence * 100)}%]` +
+                          (f.verified ? '' : `  -- ${f.error || 'did not stick'}`)
+                      )
+                      .join('\n')
                 )
               }, 'filling')
             }
@@ -67,11 +78,13 @@ export default function AdvancedSection({
         )}
       </Section>
 
+      <SiteAccessSection />
+
       <Section
         title="Extra domains"
         description="Companies that host their own form. The agent's page script is registered on these at runtime."
       >
-        <Field label="Domains" hint="One per line, e.g. careers.example.com. Chrome may ask you to grant access.">
+        <Field label="Domains" hint="One per line, e.g. careers.example.com. Needs the site access grant above.">
           <ListInput
             value={settings.customApplyDomains}
             onChange={(v) => patch({ customApplyDomains: v })}
