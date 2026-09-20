@@ -13,6 +13,14 @@ import type { PreflightCheck } from '@/background/orchestrator'
 import type { CycleSummary, RecipeHealth } from '@/background/run-history'
 import type { SetupResult } from '@/discovery/setup'
 import type { AutopilotResult } from '@/background/autopilot'
+import type { Evidence } from '@/storage/evidence'
+import type { SiteMemory } from '@/storage/site-memory'
+import type { SelfTestReport } from '@/background/self-test'
+
+export type { SelfTestReport }
+
+export type SiteMemoryRow = { host: string } & SiteMemory
+export type { Evidence }
 import type { AgentState, BroadcastEvent, UiRequest } from '@/shared/messages'
 import type {
   AnswerBankEntry,
@@ -55,7 +63,22 @@ export const api = {
   start: () => sendToWorker<AgentState>({ type: 'ui:startAgent' }),
   stop: () => sendToWorker<AgentState>({ type: 'ui:stopAgent' }),
   kill: () => sendToWorker<AgentState>({ type: 'ui:killSwitch' }),
-  testLlm: (prompt?: string) => sendToWorker<{ reply: string }>({ type: 'ui:testLlm', prompt }),
+  testLlm: (prompt?: string) =>
+    sendToWorker<{
+      reply: string
+      jsonOk: boolean
+      jsonDetail: string
+      elapsedMs: number
+      queuedBehind: number
+    }>({ type: 'ui:testLlm', prompt }),
+  listModels: () => sendToWorker<{ models: string[] | null }>({ type: 'ui:listModels' }),
+  cancelModelQueue: () => sendToWorker<{ dropped: number }>({ type: 'ui:cancelModelQueue' }),
+  listEvidence: () => sendToWorker<{ evidence: Evidence[] }>({ type: 'ui:listEvidence' }),
+  clearEvidence: () => sendToWorker<{ cleared: boolean }>({ type: 'ui:clearEvidence' }),
+  listSiteMemory: () => sendToWorker<{ sites: SiteMemoryRow[] }>({ type: 'ui:listSiteMemory' }),
+  clearSiteMemory: () => sendToWorker<{ cleared: boolean }>({ type: 'ui:clearSiteMemory' }),
+  selfTest: (opts: { probePages?: boolean; probeCount?: number; probeUrl?: string } = {}) =>
+    sendToWorker<SelfTestReport>({ type: 'ui:selfTest', ...opts }),
   llmHealth: () => sendToWorker<{ status: string; detail: string }>({ type: 'ui:llmHealth' }),
   openLlmLogin: () => sendToWorker<unknown>({ type: 'ui:openLlmLogin' }),
   listAnswers: (query?: string) => sendToWorker<AnswerBankEntry[]>({ type: 'ui:listAnswers', query }),
@@ -110,10 +133,13 @@ export function useWorkerEvents(kinds: Array<BroadcastEvent['type']>): {
   tick: number
   state: AgentState | null
   logLine: { level: string; scope: string; message: string; at: number } | null
+  /** What the worker is blocked on right now, for surfaces that would otherwise look frozen. */
+  activity: { label: string; detail: string; at: number } | null
 } {
   const [tick, setTick] = useState(0)
   const [state, setState] = useState<AgentState | null>(null)
   const [logLine, setLogLine] = useState<{ level: string; scope: string; message: string; at: number } | null>(null)
+  const [activity, setActivity] = useState<{ label: string; detail: string; at: number } | null>(null)
   const wanted = useRef(kinds)
   wanted.current = kinds
 
@@ -123,13 +149,14 @@ export function useWorkerEvents(kinds: Array<BroadcastEvent['type']>): {
       if (!wanted.current.includes(msg.type)) return
       if (msg.type === 'evt:state') setState(msg.state)
       if (msg.type === 'evt:log') setLogLine({ level: msg.level, scope: msg.scope, message: msg.message, at: msg.at })
+      if (msg.type === 'evt:activity') setActivity({ label: msg.label, detail: msg.detail, at: msg.at })
       setTick((t) => t + 1)
     }
     chrome.runtime.onMessage.addListener(listener)
     return () => chrome.runtime.onMessage.removeListener(listener)
   }, [])
 
-  return { tick, state, logLine }
+  return { tick, state, logLine, activity }
 }
 
 /** Load-once-with-refresh. `deps` re-runs the loader like useEffect would. */

@@ -120,6 +120,46 @@ export class OpenAiCompatibleDriver implements LlmDriver {
     return /\/v1$/.test(base) ? `${base}/chat/completions` : `${base}/v1/chat/completions`
   }
 
+  protected modelsUrl(): string {
+    const base = this.baseUrl()
+    return /\/v1$/.test(base) ? `${base}/models` : `${base}/v1/models`
+  }
+
+  /**
+   * The models this key can actually call.
+   *
+   * Typing a model name by hand is a trap: providers retire them on their own
+   * schedule and the only symptom is a 410 at the moment you try to use it,
+   * long after the name was entered and while every guide still recommends it.
+   * NVIDIA retired meta/llama-3.1-70b-instruct in August 2026 exactly that way.
+   * Asking the endpoint is the only answer that stays correct.
+   */
+  async listModels(): Promise<string[]> {
+    const key = this.config.apiKey.trim()
+    if (!key) throw new LlmError('No API key configured', 'config')
+
+    const url = this.modelsUrl()
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+    }).catch((e: Error) => {
+      throw new LlmError(friendlyFetchError(e, url), 'transport')
+    })
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      throw new LlmError(
+        `Could not list models (HTTP ${res.status}): ${body.slice(0, 300)}`,
+        res.status === 401 || res.status === 403 ? 'config' : 'transport'
+      )
+    }
+
+    const payload = (await res.json()) as { data?: Array<{ id?: unknown }> }
+    return (payload.data ?? [])
+      .map((m) => String(m.id ?? ''))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b))
+  }
+
   async health(): Promise<{ status: LlmHealth; detail: string }> {
     if (!this.config.apiKey.trim()) return { status: 'needs_login', detail: 'No API key set' }
     if (!this.config.model.trim()) return { status: 'needs_login', detail: 'No model name set' }
@@ -185,13 +225,26 @@ export class OpenAiCompatibleDriver implements LlmDriver {
 
     if (!res.ok) {
       const detail = await res.text().catch(() => '')
-      const code = res.status === 401 || res.status === 403 ? 'config' : res.status === 429 ? 'busy' : 'transport'
-      const hint =
-        res.status === 404 && /model/i.test(detail)
-          ? ` Check that "${this.config.model}" is exactly as listed at build.nvidia.com — e.g. meta/llama-3.1-70b-instruct, not openai/gpt-oss-20b if that slug is not hosted.`
-          : usedJsonMode
-            ? ''
-            : ''
+      const code =
+        res.status === 401 || res.status === 403
+          ? 'config'
+          : res.status === 429
+            ? 'busy'
+            : // A retired model is a settings problem, not a transient one. Marking
+              // it transport made the broker retry it three times and then fail
+              // over, burning a minute per request on a name that will never work.
+              res.status === 410
+              ? 'config'
+              : 'transport'
+
+      // Naming a replacement model here is how this message goes stale: the one
+      // it used to recommend, meta/llama-3.1-70b-instruct, was itself retired in
+      // August 2026. Point at the live catalogue instead.
+      const modelProblem = res.status === 410 || (res.status === 404 && /model/i.test(detail))
+      const hint = modelProblem
+        ? ` The model "${this.config.model}" is not available on this key — providers retire them on their own schedule. Press "List available models" in Settings → Model to see what this key can actually call, and pick one.`
+        : ''
+
       throw new LlmError(`Chat API ${res.status}: ${detail.slice(0, 300)}${hint}`, code)
     }
 
@@ -226,7 +279,12 @@ export class NimDriver extends OpenAiCompatibleDriver {
   async health(): Promise<{ status: LlmHealth; detail: string }> {
     if (!this.config.apiKey.trim()) return { status: 'needs_login', detail: 'No NIM API key set' }
     if (!this.config.model.trim()) {
-      return { status: 'needs_login', detail: 'Pick a NIM model, e.g. meta/llama-3.1-405b-instruct' }
+      // Deliberately no example: the one that used to be here outlived its own
+      // availability. "List available models" asks the key what it can call.
+      return {
+        status: 'needs_login',
+        detail: 'No NIM model set - press "List available models" to see what this key can call',
+      }
     }
     return { status: 'ok', detail: `NIM / ${this.config.model}` }
   }
@@ -248,7 +306,7 @@ function friendlyFetchError(e: Error, url: string, timeoutMs?: number): string {
     return (
       `${msg} on ${host}. ` +
       `NIM's large models (405B) cold-start in 20-40s and resume parsing sends up to 24k chars — ` +
-      `try a smaller model (meta/llama-3.1-70b-instruct) or raise Settings → Model → Request timeout. ` +
+      `try a smaller model, or raise Settings → Model → Request timeout. ` +
       `Fallback was not ready, so sign in to chat.deepseek.com or fix the NIM key for automatic failover.`
     )
   }

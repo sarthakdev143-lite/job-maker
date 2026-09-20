@@ -35,8 +35,27 @@ export class DeepSeekWebDriver implements LlmDriver {
   private tabId: number | null = null
   private windowId: number | null = null
   private requestsSinceNewChat = 0
+  private lastSentAt = 0
 
   constructor(private config: LlmConfig) {}
+
+  /**
+   * Hold off until `minRequestGapMs` has passed since the last prompt.
+   *
+   * A run can produce prompts back to back for hours. The chat product is not
+   * built for that, and hammering it is both rude and the fastest way to get
+   * an account limited. If this pacing is too slow for the volume you want,
+   * the answer is the paid API driver, which is sold for exactly this.
+   */
+  private async pace(): Promise<void> {
+    const gap = Math.max(0, this.config.minRequestGapMs ?? 0)
+    if (gap === 0 || this.lastSentAt === 0) return
+    const waitMs = gap - (Date.now() - this.lastSentAt)
+    if (waitMs > 0) {
+      log.debug('Pacing the next DeepSeek prompt', { waitMs })
+      await sleep(waitMs)
+    }
+  }
 
   updateConfig(config: LlmConfig): void {
     this.config = config
@@ -191,6 +210,8 @@ export class DeepSeekWebDriver implements LlmDriver {
     const timeoutMs = req.timeoutMs ?? this.config.requestTimeoutMs
     const requestId = uid('req')
 
+    await this.pace()
+    this.lastSentAt = Date.now()
     activity.note('sent the prompt to DeepSeek, waiting for a reply')
 
     let res: DeepSeekResponse

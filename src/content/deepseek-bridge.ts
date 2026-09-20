@@ -13,6 +13,9 @@
  */
 
 import type { DeepSeekRequest, DeepSeekResponse } from '@/shared/messages'
+import { personaForPage, type Persona } from '@/human/persona'
+import { typeInto, typingOptionsFor } from '@/human/typing'
+import { humanClick } from '@/human/pointer'
 
 type SelectorSet = {
   composer: string[]
@@ -144,24 +147,18 @@ function loggedIn(): boolean {
 }
 
 /**
- * Set a value the way a user would, so React's controlled input sees it.
- * Assigning `.value` directly updates the DOM but not React's internal state,
- * and the app then sends an empty message.
+ * Type the prompt into the composer in irregular bursts.
+ *
+ * Writing the whole prompt in one assignment is the clearest automation tell
+ * there is, and some composers only enable their send control after a run of
+ * input events. `typeInto` also goes through the native value setter, which is
+ * what makes React's controlled input actually see the text -- assigning
+ * `.value` updates the DOM but not the app's state, and it then sends an empty
+ * message. The plan is budget bound, so even a very long prompt finishes in
+ * about two seconds.
  */
-function setComposerValue(el: HTMLElement, value: string): void {
-  if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
-    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
-    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
-    el.focus()
-    setter?.call(el, value)
-    el.dispatchEvent(new Event('input', { bubbles: true }))
-    el.dispatchEvent(new Event('change', { bubbles: true }))
-    return
-  }
-  // contenteditable composer
-  el.focus()
-  el.textContent = value
-  el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }))
+async function typeComposerValue(el: HTMLElement, value: string, persona: Persona): Promise<void> {
+  await typeInto(el, value, typingOptionsFor(persona, { budgetMs: 2200 }))
 }
 
 function pressEnter(el: HTMLElement): void {
@@ -184,10 +181,10 @@ function pressEnter(el: HTMLElement): void {
  * treats it as a newline, and clicking alone is unreliable because the button's
  * class names are obfuscated and change between deploys -- so we try both.
  */
-function submitComposer(composer: HTMLElement): void {
+async function submitComposer(composer: HTMLElement, persona: Persona): Promise<void> {
   const explicit = queryAny<HTMLElement>(selectors.sendButton)
   if (explicit && isVisible(explicit) && explicit.getAttribute('aria-disabled') !== 'true') {
-    explicit.click()
+    await humanClick(explicit, { pressMs: persona.pressMs, scroll: false })
     return
   }
   const form = composer.closest('form')
@@ -274,12 +271,13 @@ async function sendPrompt(prompt: string, timeoutMs: number, requestId = ''): Pr
       throw Object.assign(new Error('Not signed in to DeepSeek'), { code: 'not_logged_in' })
     }
     const composer = await waitForComposer()
+    const persona = await personaForPage()
     const baseline = assistantNodes().length
 
-    setComposerValue(composer, prompt)
+    await typeComposerValue(composer, prompt, persona)
     // Give the app a beat to enable its send control after the input event.
     await sleep(180)
-    submitComposer(composer)
+    await submitComposer(composer, persona)
 
     // If the composer still holds our text after a moment, the send did not
     // take; try once more with the other mechanism before giving up.
@@ -287,7 +285,7 @@ async function sendPrompt(prompt: string, timeoutMs: number, requestId = ''): Pr
     const stillThere =
       composer instanceof HTMLTextAreaElement ? composer.value.trim().length > 0 : (composer.textContent ?? '').trim().length > 0
     if (stillThere && assistantNodes().length === baseline) {
-      submitComposer(composer)
+      await submitComposer(composer, persona)
     }
 
     const reply = await waitForReply(baseline, timeoutMs, requestId)
@@ -303,7 +301,7 @@ async function sendPrompt(prompt: string, timeoutMs: number, requestId = ''): Pr
 async function startNewChat(): Promise<void> {
   const btn = queryAny<HTMLElement>(selectors.newChatButton)
   if (btn && isVisible(btn)) {
-    btn.click()
+    await humanClick(btn, { scroll: false })
     await sleep(900)
     return
   }

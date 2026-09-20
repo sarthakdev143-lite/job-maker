@@ -156,6 +156,19 @@ class LlmBroker {
     }
   }
 
+  /**
+   * Model ids this key can call, or null for a driver with no catalogue.
+   *
+   * Not queued behind the request lock: it is a cheap metadata call and the
+   * user is sitting in front of the settings page waiting for it.
+   */
+  async listModels(): Promise<string[] | null> {
+    const driver = await this.getDriver()
+    const lister = driver as { listModels?: () => Promise<string[]> }
+    if (typeof lister.listModels !== 'function') return null
+    return lister.listModels()
+  }
+
   async openLogin(): Promise<void> {
     const driver = await this.getDriver()
     if (driver.openLogin) {
@@ -178,13 +191,38 @@ class LlmBroker {
   /* -------------------------------------------------------------- requests */
 
   /** Raw text completion. Used by the options-page test button. */
-  async completeText(req: CompleteRequest, label = 'text'): Promise<string> {
+  async completeText(
+    req: CompleteRequest,
+    label = 'text',
+    opts: { retries?: number; useFallback?: boolean } = {}
+  ): Promise<string> {
     return this.enqueue(label, async () => {
       const driver = await this.getDriver()
       const { llm } = await getSettings()
-      const fallback = await this.getFallbackDriver(driver, llm)
-      return this.attempt(driver, req, llm.maxRetries, label, fallback)
+      const fallback = opts.useFallback === false ? null : await this.getFallbackDriver(driver, llm)
+      const retries = opts.retries ?? llm.maxRetries
+      return this.attempt(driver, req, retries, label, fallback)
     })
+  }
+
+  /**
+   * Abandon everything waiting, and forget the current driver.
+   *
+   * One queue serves the whole extension, so a request grinding through its
+   * retry budget blocks every later one behind it -- press "Run test" while a
+   * resume import is still failing and the test does not even start for
+   * minutes, which reads as two separate things being broken. This is the way
+   * out of that without reloading the extension.
+   */
+  async abortQueue(): Promise<number> {
+    const dropped = this.queue.length
+    const waiting = this.queue.splice(0, this.queue.length)
+    for (const task of waiting) {
+      task.reject(new LlmError(`Cancelled: ${task.label} was dropped from the queue`, 'transport'))
+    }
+    await this.invalidate()
+    log.warn(`Model queue cleared: ${dropped} request(s) dropped`)
+    return dropped
   }
 
   /**
@@ -255,7 +293,8 @@ class LlmBroker {
 
       throw new LlmError(
         `Model never returned valid JSON for ${label}: ${lastParseError?.message ?? 'unknown'}. ` +
-          `If using google/diffusiongemma, switch to meta/llama-3.1-70b-instruct or meta/llama-3.1-405b-instruct — diffusion models are not tuned for strict JSON.`,
+          `Diffusion and base models are not tuned for strict JSON. In Settings → Model, press ` +
+          `"List available models" and pick one with "instruct" in its name.`,
         'transport'
       )
     })
