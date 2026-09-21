@@ -24,6 +24,7 @@ export type CanonicalKey =
   | 'phone'
   | 'addressLine1'
   | 'addressLine2'
+  | 'location'
   | 'city'
   | 'state'
   | 'postalCode'
@@ -71,6 +72,10 @@ const PATTERNS: Array<[CanonicalKey, RegExp]> = [
   // Address
   ['addressLine1', /^address$|address line 1|street address|^street$/],
   ['addressLine2', /address line 2|apartment|apt suite|unit number/],
+  // "Where are you based?" wants the whole answer, not just the city -- a form
+  // asking for city, state and country in one box and getting "Indore" reads as
+  // an incomplete application. Checked before `city` so the composite wins.
+  ['location', /where.{0,12}(based|located|live|reside)|current location|^location$|city state.{0,12}country|city.{0,20}country|your location/],
   ['city', /^city$|^town$|city town|^location city$/],
   ['state', /^state$|^province$|state province|^region$/],
   ['postalCode', /postal code|zip code|^zip$|^pincode$|^pin code$/],
@@ -256,6 +261,15 @@ export function answerCanonical(
       return v(profile.addressLine1)
     case 'addressLine2':
       return v(profile.addressLine2, 0.9)
+    case 'location': {
+      // Everything known, in the order a person would write it.
+      const parts = [profile.city, profile.state, profile.country].map((x) => x.trim()).filter(Boolean)
+      if (parts.length === 0) return v('')
+      // Graded by how much of the question the profile can actually answer: a
+      // bare country is true but thin, and should not read as certain.
+      const certainty = parts.length >= 3 ? 0.95 : parts.length === 2 ? 0.88 : 0.75
+      return v(matchOption(field, parts.join(', ')), certainty)
+    }
     case 'city': {
       // A bare city name is dangerous in a location typeahead. Asked for
       // "Indore" the widget offered "Indore, United States" first, and a real
