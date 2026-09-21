@@ -65,13 +65,23 @@ export const genericAdapter: SiteAdapter = {
     const score =
       (hasEmail ? 0.3 : 0) + (hasFile ? 0.25 : 0) + (hasName ? 0.2 : 0) + Math.min(signalHits * 0.12, 0.36)
 
+    // A <form> element is not what makes something an application form.
+    // Ashby, and every React careers page built like it, renders its inputs
+    // with no form tag at all -- the runner declared such a page "not an
+    // application form" and skipped a job it could have completed.
+    const labelledInputs = doc.querySelectorAll('input:not([type="hidden"]), textarea, select').length
+    const hasSubmitControl = Array.from(
+      doc.querySelectorAll<HTMLElement>('button, input[type="submit"], [role="button"]')
+    ).some((el) => GENERIC_SUBMIT_TEXT.test((textOf(el) || (el as HTMLInputElement).value || '').trim()))
+    const looksLikeForm = forms.length > 0 || (labelledInputs >= 3 && hasSubmitControl)
+
     return {
-      isApplicationForm: forms.length > 0 && score >= 0.5,
+      isApplicationForm: looksLikeForm && score >= 0.5,
       confidence: Math.min(score, 0.75), // never as confident as a real adapter
       jobTitle: textOf(doc.querySelector('h1')) || doc.title,
       company: hostCompany(),
       multiStep: hasNextControl(doc),
-      detail: `${forms.length} form(s), ${signalHits} application signal(s)`,
+      detail: `${forms.length} form(s), ${labelledInputs} field(s), ${signalHits} application signal(s)`,
     }
   },
 

@@ -63,3 +63,27 @@ describe('generic adapter step detection', () => {
     expect(genericAdapter.detect(doc, 'https://careers.example.com/apply').multiStep).toBe(false)
   })
 })
+
+describe('a form with no form element', () => {
+  it('recognises an application rendered as bare inputs', () => {
+    // Ashby, and React careers pages built the same way, render no <form>.
+    const doc = mount(`
+      <h1>Deployed Architect</h1>
+      <label for="n">Name</label><input id="n" name="name" type="text" />
+      <label for="e">Email</label><input id="e" type="email" name="email" />
+      <label for="cv">Upload your resume</label><input id="cv" type="file" name="resume" />
+      <p>Apply for this job. Cover letter optional.</p>
+      <button>Submit Application</button>`)
+
+    expect(genericAdapter.detect(doc, 'https://careers.example.com/apply').isApplicationForm).toBe(true)
+  })
+
+  it('does not mistake a job advert with a search box for an application', () => {
+    const doc = mount(`
+      <h1>Senior Engineer</h1>
+      <p>We are hiring. Read about the role below.</p>
+      <input type="search" name="q" /><button>Search</button>`)
+
+    expect(genericAdapter.detect(doc, 'https://careers.example.com/jobs/1').isApplicationForm).toBe(false)
+  })
+})
