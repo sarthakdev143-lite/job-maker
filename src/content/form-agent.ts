@@ -11,6 +11,7 @@
  */
 
 import { harvestFields, pageText } from '@/form/harvester'
+import { revealComboboxOptions } from '@/form/combobox-options'
 import { outlinePage } from '@/form/outline'
 import { applyFillPlan, attachFile } from '@/form/filler'
 import { adapterForUrl } from '@/sites/registry'
@@ -255,6 +256,11 @@ async function handle(msg: FormRequest): Promise<FormResponse> {
 
     case 'form:harvest': {
       const fields = harvestFields(document)
+      // React-select renders its menu only once clicked, so a mandatory
+      // multiple-choice question arrives with no choices and every tier below
+      // has nothing to work with. One pass of clicking them open costs about a
+      // second and is what makes those questions answerable at all.
+      await revealComboboxOptions(fields, document)
       const detected = adapter.detect(document, location.href)
       return { ok: true, type: 'form:harvest', fields, vendor: adapter.id, multiStep: detected.multiStep }
     }
