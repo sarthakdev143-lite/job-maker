@@ -17,7 +17,7 @@
  * reach tier 4 at all, which is the whole point of the design.
  */
 
-import { answerCanonical, canonicalKeyFor, isDocumentKey, type CanonicalKey } from './canonical'
+import { answerCanonical, bestOption, canonicalKeyFor, isDocumentKey, type CanonicalKey } from './canonical'
 import { guessAnswer } from './guess'
 import { adapterById } from '@/sites/registry'
 import { lookup as bankLookup, promptDigest, remember, touch } from '@/storage/answer-bank'
@@ -355,13 +355,9 @@ function coerceToField(value: string, field: FieldDescriptor): string {
   if (field.options.length === 0) {
     return field.maxLength && trimmed.length > field.maxLength ? trimmed.slice(0, field.maxLength) : trimmed
   }
-  const lower = trimmed.toLowerCase()
-  const exact = field.options.find((o) => o.label.toLowerCase() === lower || o.value.toLowerCase() === lower)
-  if (exact) return exact.label
-  const partial = field.options.find(
-    (o) => o.label.toLowerCase().includes(lower) || lower.includes(o.label.toLowerCase())
-  )
-  return partial?.label ?? trimmed
+  // Same rule the canonical tier uses, and for the same reason: an unqualified
+  // substring match turns "India" into "British Indian Ocean Territory".
+  return bestOption(field.options, trimmed) ?? trimmed
 }
 
 /**
@@ -373,14 +369,7 @@ function isCompatible(value: string, field: FieldDescriptor): boolean {
   const v = String(value ?? '').trim()
   if (!v) return false
   if (field.options.length > 0 && (field.kind === 'select' || field.kind === 'radio')) {
-    const lower = v.toLowerCase()
-    return field.options.some(
-      (o) =>
-        o.label.toLowerCase() === lower ||
-        o.value.toLowerCase() === lower ||
-        o.label.toLowerCase().includes(lower) ||
-        lower.includes(o.label.toLowerCase())
-    )
+    return bestOption(field.options, v) !== null
   }
   if (field.kind === 'email') return /.+@.+\..+/.test(v)
   if (field.kind === 'number') return /^-?\d+(\.\d+)?$/.test(v.replace(/[,\s]/g, ''))

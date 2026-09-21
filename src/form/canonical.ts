@@ -162,15 +162,57 @@ function declineOption(field: FieldDescriptor, fallback: string): string {
   return decline?.label ?? fallback
 }
 
-function matchOption(field: FieldDescriptor, value: string): string {
-  if (field.options.length === 0) return value
-  const lower = value.toLowerCase().trim()
-  const exact = field.options.find((o) => o.label.toLowerCase().trim() === lower)
-  if (exact) return exact.label
-  const partial = field.options.find(
-    (o) => o.label.toLowerCase().includes(lower) || lower.includes(o.label.toLowerCase())
+/**
+ * The option that means what the profile said.
+ *
+ * A plain substring match is not good enough, and the failure is not subtle.
+ * Asked for "India" against a full country list, the first option *containing*
+ * that text is "British Indian Ocean Territory" -- a real place, three thousand
+ * kilometres away, and an application that went out claiming it. "India +91" is
+ * the right answer and is also only a substring match, so the two have to be
+ * told apart by how much longer the option is than the answer.
+ *
+ * This only became reachable once dropdowns started reporting their options at
+ * all; before that most of these lists looked empty and the answer was passed
+ * through untouched.
+ */
+export function matchOption(field: FieldDescriptor, value: string): string {
+  return bestOption(field.options, value) ?? value
+}
+
+/** How much extra text an option may carry and still count as the same answer. */
+const MAX_EXTRA_CHARS = 8
+
+export function bestOption(
+  options: Array<{ value: string; label: string }>,
+  value: string
+): string | null {
+  if (options.length === 0) return null
+  const want = value.toLowerCase().trim()
+  if (!want) return null
+
+  const exact = options.find(
+    (o) => o.label.toLowerCase().trim() === want || o.value.toLowerCase().trim() === want
   )
-  return partial?.label ?? value
+  if (exact) return exact.label
+
+  // A prefix is the common shape: "India" against "India +91", "Yes" against
+  // "Yes, I am". Take the closest one, not the first in the list.
+  let best: { label: string; extra: number } | null = null
+  for (const option of options) {
+    const label = option.label.toLowerCase().trim()
+    if (!label) continue
+    const prefix = label.startsWith(want) || want.startsWith(label)
+    const contains = !prefix && (label.includes(want) || want.includes(label))
+    const extra = Math.abs(label.length - want.length)
+    // A containing match has to be a much closer fit than a prefix, because it
+    // is the shape that produced the wrong country.
+    const allowed = prefix ? MAX_EXTRA_CHARS : 2
+    if (!prefix && !contains) continue
+    if (extra > allowed) continue
+    if (!best || extra < best.extra) best = { label: option.label, extra }
+  }
+  return best?.label ?? null
 }
 
 export type CanonicalAnswer = { value: string; confidence: number; note: string }

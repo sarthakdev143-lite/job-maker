@@ -28,9 +28,21 @@ export function isOffLimitsQuestion(field: FieldDescriptor): boolean {
   return OFF_LIMITS.test(`${field.label} ${field.placeholder} ${field.name}`.trim())
 }
 
+/**
+ * Every way a form offers "I would rather not say".
+ *
+ * Anchored patterns were too tight for the real wording. Greenhouse writes
+ * "Decline To Self Identify" and "I don't wish to answer"; a live Twilio form
+ * matched neither, so the gender question fell through to the last resort and
+ * picked the first option on the list, which was "Male". Inventing someone's
+ * gender is worse than leaving the question for them.
+ */
+const DECLINE =
+  /prefer not to|decline to|do ?n[o']?t wish|don't wish|choose not to|rather not|not to (say|answer|disclose|identify)|no answer|opt out/i
+
 /** Option text that is true for almost anyone, in descending preference. */
 const SAFE_OPTIONS: RegExp[] = [
-  /^(prefer not to (say|answer|disclose)|decline to (self.?identify|answer)|do not wish to disclose)$/i,
+  DECLINE,
   /^(other|others|any|any of the above|open to (all|any))$/i,
   /^(remote|work from home|anywhere|flexible)$/i,
 ]
@@ -45,6 +57,17 @@ const PLACEHOLDER = /^(\s*|select|select\.\.\.|choose|choose\.\.\.|--.*--|please
 export function guessAnswer(field: FieldDescriptor, profile: Profile, job: Job | null): Guess | null {
   const question = `${field.label} ${field.placeholder} ${field.name}`.trim()
   if (isOffLimitsQuestion(field)) return null
+
+  // Voluntary demographic questions are answered by declining or not at all.
+  // Every form that asks one offers a way to decline; if this cannot find it,
+  // the honest outcome is to leave the question for the applicant, not to pick
+  // the first option on the list. A live Twilio form answered "Male" that way.
+  if (SELF_IDENTIFICATION.test(question)) {
+    const decline = field.options.find((o) => DECLINE.test(o.label))
+    return decline
+      ? { value: decline.label, confidence: 0.75, reasoning: 'declined to self-identify' }
+      : null
+  }
 
   const options = field.options.filter((o) => !PLACEHOLDER.test(o.label.trim()))
 
@@ -102,6 +125,10 @@ function pickOption(
     ? { value: first.label, confidence: 0.45, reasoning: 'no option matched; chose the first to avoid a blank answer' }
     : null
 }
+
+/** Voluntary demographic questions, which are never guessed at. */
+const SELF_IDENTIFICATION =
+  /self.?identif|gender|\bsex\b|ethnic|\brace\b|hispanic|latino|veteran|disability|disabled|pronoun|sexual orientation|lgbt/i
 
 /** "3-5 years", "0-15 days", "15 to 30 days" against a number from the profile. */
 function matchBand(
