@@ -98,6 +98,20 @@ async function remember(windowId: number): Promise<void> {
   }
 }
 
+/**
+ * Hand a window to the user and stop treating it as ours.
+ *
+ * A handed-over window holds a filled application waiting on one click. Every
+ * other worker window is disposable and gets closed on stop and on wake, which
+ * would take the filled form with it -- the one window in the run that must
+ * outlive the run. Disowning it is the whole fix: the reaper only ever closes
+ * windows it still owns.
+ */
+export async function disownWindow(windowId: number | null | undefined): Promise<void> {
+  if (typeof windowId !== 'number') return
+  await forget(windowId)
+}
+
 async function forget(windowId: number): Promise<void> {
   owned.delete(windowId)
   try {

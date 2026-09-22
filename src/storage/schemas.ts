@@ -197,7 +197,18 @@ export type SearchRecipe = z.infer<typeof SearchRecipeSchema>
 
 /* --------------------------------------------------------------- autonomy */
 
-export const AutonomyModeSchema = z.enum(['dry_run', 'review', 'gated', 'full'])
+/**
+ * How far the agent goes on its own.
+ *
+ * 'handoff' exists because several boards will not accept an automated
+ * submission at all: Greenhouse, Lever and Ashby all score the session with
+ * reCAPTCHA or hCaptcha, and a Greenhouse board refused three applications that
+ * were filled perfectly and completely. On those sites the useful division of
+ * labour is the agent doing the twenty minutes of form filling and the person
+ * pressing the last button, so handoff fills everything, stops at submit, and
+ * leaves the finished form on screen.
+ */
+export const AutonomyModeSchema = z.enum(['dry_run', 'review', 'handoff', 'gated', 'full'])
 
 export const AutonomySchema = z.object({
   /** Master switch. While false, nothing runs unattended. */

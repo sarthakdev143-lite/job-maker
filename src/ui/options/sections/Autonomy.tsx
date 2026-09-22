@@ -25,6 +25,15 @@ const MODES: Array<{ id: AutonomyMode; title: string; body: string; tone: string
     tone: 'var(--accent)',
   },
   {
+    id: 'handoff',
+    title: 'Fill it, I press submit',
+    body:
+      'Does the whole application and stops at the last button, with the filled form on screen and a notification. ' +
+      'Greenhouse, Lever and Ashby all check whether a person is driving the browser and can refuse an automated ' +
+      'submission outright, so on those boards this is the difference between an application sent and one thrown away.',
+    tone: 'var(--accent)',
+  },
+  {
     id: 'gated',
     title: 'Submit above your thresholds',
     body: 'Submits on its own when the match score and fill confidence both clear the bars below. Everything else waits for you.',

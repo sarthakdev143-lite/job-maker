@@ -14,7 +14,7 @@
 import { byCheapestFirst, runDiscovery, unscoredJobs } from '@/discovery'
 import { getRecipes } from '@/storage/settings'
 import { scoreJob } from '@/matching/scorer'
-import { applyToJob } from '@/runner/apply-machine'
+import { applyToJob, handoffCapacityReached } from '@/runner/apply-machine'
 import { PermissionError } from '@/shared/injection'
 import { dailyCounterKey, withinActiveWindow } from '@/runner/autonomy-gate'
 import { applicationsRepo, jobsRepo, logsRepo } from '@/storage/db'
@@ -765,6 +765,18 @@ class Orchestrator {
     settings: Settings
   ): Promise<{ carryOn: boolean; result: ApplyAttempt; gateReasons: string[] }> {
     if (this.shouldStop()) return { carryOn: false, result: 'stopped', gateReasons: [] }
+
+    // In handoff mode every finished application stays on screen waiting for a
+    // click. Filling in a fiftieth one behind forty-nine others helps nobody --
+    // a person coming back to that closes the lot rather than finishing any --
+    // so the run waits here, with the queue intact, until some are dealt with.
+    if (await handoffCapacityReached(settings.autonomy.mode)) {
+      const message = 'Waiting: several filled applications are open and need your submit'
+      log.info(message)
+      activity.begin('paused', message, 60_000)
+      this.patch({ phase: 'idle', lastError: '' })
+      return { carryOn: false, result: 'skipped', gateReasons: [message] }
+    }
 
     // A job parked for review stays queued so the user can still see it, but
     // re-running it every cycle would redo the model work and re-park it for

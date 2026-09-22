@@ -222,3 +222,26 @@ describe('reaching the final step overrides our own required-field guess', () =>
     expect(decision.reasons.join(' ')).toMatch(/cap/i)
   })
 })
+
+describe('handoff mode', () => {
+  it('parks every application and asks for the window to be shown', () => {
+    const decision = evaluateGate(facts({ autonomy: AutonomySchema.parse({ mode: 'handoff' }) }))
+    expect(decision.action).toBe('review')
+    expect(decision.handoff).toBe(true)
+    expect(decision.reasons.join(' ')).toMatch(/handoff/i)
+  })
+
+  it('does not hand off in the other modes', () => {
+    for (const mode of ['dry_run', 'review', 'full'] as const) {
+      const decision = evaluateGate(facts({ autonomy: AutonomySchema.parse({ mode }) }))
+      expect(decision.handoff ?? false).toBe(false)
+    }
+  })
+
+  it('still refuses a disabled vendor before offering a handoff', () => {
+    const decision = evaluateGate(
+      facts({ autonomy: AutonomySchema.parse({ mode: 'handoff' }), vendorEnabled: false })
+    )
+    expect(decision.action).toBe('skip')
+  })
+})

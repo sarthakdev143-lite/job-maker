@@ -44,7 +44,7 @@ import {
 import type { PageOutline } from '@/form/outline'
 import { learnApplyEntry, missApplyEntry, rememberedApplyEntry } from '@/storage/site-memory'
 import { recordEvidence } from '@/storage/evidence'
-import { closeWorkerWindow, isOwnedWindow, openWorkerWindow, rememberOwnedWindow } from '@/shared/windows'
+import { closeWorkerWindow, disownWindow, isOwnedWindow, openWorkerWindow, rememberOwnedWindow } from '@/shared/windows'
 import { activity } from '@/shared/activity'
 
 const log = createLogger('runner')
@@ -76,6 +76,71 @@ export type ApplyOutcome = {
 }
 
 /* ------------------------------------------------------------ tab control */
+
+/**
+ * Windows holding a filled form that is waiting on the user.
+ *
+ * Kept in memory only: if the worker restarts, the windows are still on screen
+ * and the user can still finish them, which is all that matters.
+ */
+const handedOver = new Set<number>()
+
+/**
+ * How many filled forms may be left on screen before the run waits.
+ *
+ * Each handoff keeps its window open, which is the point -- but an overnight
+ * run would otherwise bury the desktop under fifty of them, and someone coming
+ * back to that closes the lot rather than finishing any of them. Stopping at a
+ * handful keeps the pile something a person can actually work through.
+ */
+const MAX_OPEN_HANDOFFS = 6
+
+/** Handoff windows still open, forgetting any the user has closed. */
+async function openHandoffs(): Promise<number> {
+  for (const windowId of [...handedOver]) {
+    try {
+      await chrome.windows.get(windowId)
+    } catch {
+      handedOver.delete(windowId) // the user dealt with it
+    }
+  }
+  return handedOver.size
+}
+
+/**
+ * Is there room to leave another form on screen?
+ *
+ * Asked before an application starts, so a full screen pauses the run with the
+ * queue intact rather than filling in a form with nowhere to put it.
+ */
+export async function handoffCapacityReached(mode: string): Promise<boolean> {
+  if (mode !== 'handoff') return false
+  return (await openHandoffs()) >= MAX_OPEN_HANDOFFS
+}
+
+/**
+ * Put a filled form in front of the user and leave it there.
+ *
+ * Used when the agent has done everything except press submit -- either because
+ * handoff mode says a person finishes the job, or because the site refused an
+ * automated submission and the only way this application gets sent is by hand.
+ * Closing the window at that moment throws away twenty minutes of filling.
+ */
+async function handOver(tab: WorkerTab | null, title: string, detail: string): Promise<boolean> {
+  if (!tab) return false
+  try {
+    await chrome.windows.update(tab.windowId, { state: 'normal', focused: true, drawAttention: true })
+    handedOver.add(tab.windowId)
+    // It belongs to the user now. Without this the reaper closes it on the next
+    // stop or wake and throws away the filled form it was holding.
+    await disownWindow(tab.windowId)
+    notify(title, detail)
+    return true
+  } catch (e) {
+    log.debug(`Could not surface the window for handoff: ${errorMessage(e)}`)
+    return false
+  }
+}
 
 /**
  * A tab plus the frame the application form actually lives in.
@@ -1033,6 +1098,21 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
           () => {}
         )
       }
+
+      // Highlighting first, so what is still unanswered is outlined on the page
+      // the user is about to be handed.
+      if (decision.handoff) {
+        const shown = await handOver(
+          tab,
+          'Ready for you to submit',
+          `${job.title} at ${job.company}: filled in, waiting on the submit button`
+        )
+        if (shown) {
+          await applicationsRepo.addTimeline(application.id, 'handoff', 'left on screen for you to submit')
+          tab = null
+        }
+      }
+
       const status = autonomy.mode === 'dry_run' ? 'dry_run' : 'needs_review'
       const updated = await applicationsRepo.update(application.id, { status })
       await applicationsRepo.addTimeline(application.id, 'gate', decision.reasons.join('; '), 'warn')

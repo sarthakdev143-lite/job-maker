@@ -17,6 +17,14 @@ export type GateDecision = {
   reasons: string[]
   /** Set when the decision is a hard stop for the whole run, not this job. */
   haltRun?: boolean
+  /**
+   * Leave the filled form on screen for the user to finish.
+   *
+   * A parked application is normally invisible: the window closes and a row
+   * appears in a list. When the plan is for a person to press submit, the form
+   * has to still be in front of them.
+   */
+  handoff?: boolean
 }
 
 export type GateFacts = {
@@ -82,6 +90,13 @@ export function evaluateGate(facts: GateFacts): GateDecision {
   }
   if (autonomy.mode === 'review') {
     return { action: 'review', reasons: ['review mode: every application waits for approval'] }
+  }
+  if (autonomy.mode === 'handoff') {
+    return {
+      action: 'review',
+      reasons: ['handoff mode: filled in and left on screen for you to submit'],
+      handoff: true,
+    }
   }
 
   // Quality gates. In 'full' mode the thresholds are skipped, but the

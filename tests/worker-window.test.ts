@@ -13,17 +13,26 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { closeWorkerWindow, isOwnedWindow, openWorkerWindow, rememberOwnedWindow } from '@/shared/windows'
+import {
+  closeAllWorkerWindows,
+  closeWorkerWindow,
+  disownWindow,
+  isOwnedWindow,
+  openWorkerWindow,
+  rememberOwnedWindow,
+} from '@/shared/windows'
 
 type CreateArgs = Record<string, unknown>
 
 let createCalls: CreateArgs[]
 let updateCalls: Array<[number, Record<string, unknown>]>
 let createImpl: (args: CreateArgs) => Promise<unknown>
+let removeCalls: number[]
 
 function installFakeChrome(): void {
   createCalls = []
   updateCalls = []
+  removeCalls = []
   createImpl = async (args) => ({ id: 7, tabs: [{ id: 42 }], state: args.state })
 
   ;(globalThis as unknown as { chrome: unknown }).chrome = {
@@ -42,7 +51,11 @@ function installFakeChrome(): void {
         updateCalls.push([id, args])
         return { id }
       }),
-      remove: vi.fn(async () => undefined),
+      get: vi.fn(async (id: number) => ({ id })),
+      remove: vi.fn(async (id: number) => {
+        removeCalls.push(id)
+        return undefined
+      }),
     },
   }
 }
@@ -130,5 +143,27 @@ describe('openWorkerWindow', () => {
     expect(windows.remove).toHaveBeenCalledWith(9)
     await closeWorkerWindow(12345)
     expect(windows.remove).not.toHaveBeenCalledWith(12345)
+  })
+})
+
+describe('a window handed to the user', () => {
+  it('is no longer closed when the run stops', async () => {
+    // Every worker window is disposable and gets reaped on stop and on wake.
+    // A handed-over one holds a filled application waiting on a single click,
+    // so reaping it throws away the whole application.
+    await rememberOwnedWindow(11)
+    await rememberOwnedWindow(12)
+    await disownWindow(12)
+
+    await closeAllWorkerWindows()
+
+    expect(removeCalls).toContain(11)
+    expect(removeCalls).not.toContain(12)
+    expect(isOwnedWindow(12)).toBe(false)
+  })
+
+  it('ignores a window id that was never there', async () => {
+    await expect(disownWindow(undefined)).resolves.toBeUndefined()
+    await expect(disownWindow(null)).resolves.toBeUndefined()
   })
 })
