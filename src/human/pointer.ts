@@ -174,3 +174,42 @@ export function readingPauseMs(text: string, persona: Pick<Persona, 'wpm'>, rng:
   const ms = (words / Math.max(60, persona.wpm)) * 60_000
   return Math.round(Math.min(4000, Math.max(120, ms * between(rng, 0.7, 1.4))))
 }
+
+/**
+ * Small, aimless movement while the agent is thinking.
+ *
+ * Between fields the agent pauses to "read" the question, and during that pause
+ * nothing at all happens: no movement, no scrolling, a cursor frozen at the
+ * pixel where it last clicked. A person reading a form is never that still, and
+ * the stillness is trivially measurable from the page. This drifts the pointer
+ * a little and occasionally nudges the scroll, for exactly as long as the pause
+ * was going to last anyway -- it costs no extra time.
+ */
+export async function driftDuring(totalMs: number, rng: Rng = Math.random): Promise<void> {
+  if (totalMs <= 0) return
+  const started = Date.now()
+  let x = typeof window === 'undefined' ? 400 : Math.round(between(rng, 100, Math.max(200, window.innerWidth - 100)))
+  let y = typeof window === 'undefined' ? 300 : Math.round(between(rng, 100, Math.max(200, window.innerHeight - 100)))
+
+  while (Date.now() - started < totalMs) {
+    const step = Math.min(Math.round(between(rng, 120, 380)), totalMs - (Date.now() - started))
+    if (step <= 0) break
+    await sleep(step)
+
+    x += Math.round(centered(rng, -40, 40))
+    y += Math.round(centered(rng, -30, 30))
+    const target = document?.elementFromPoint?.(x, y) ?? document?.body
+    if (target) emit(target, 'pointermove', { x, y })
+    if (target) emit(target, 'mousemove', { x, y })
+
+    // Now and then the page moves a little under the cursor, the way it does
+    // when someone is skimming.
+    if (rng() < 0.12 && typeof window !== 'undefined') {
+      try {
+        window.scrollBy({ top: Math.round(centered(rng, -60, 90)), behavior: 'smooth' })
+      } catch {
+        // Not every document scrolls.
+      }
+    }
+  }
+}

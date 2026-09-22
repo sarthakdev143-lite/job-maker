@@ -20,7 +20,7 @@ import { createLogger } from '@/shared/logger'
 import { normalizeText, similarity } from '@/shared/text'
 import { personaForPage, type Persona } from '@/human/persona'
 import { typeInto, typingOptionsFor } from '@/human/typing'
-import { humanClick, humanScrollTo, readingPauseMs } from '@/human/pointer'
+import { driftDuring, humanClick, humanScrollTo, readingPauseMs } from '@/human/pointer'
 import type { FilledField } from '@/storage/schemas'
 
 const log = createLogger('filler')
@@ -461,7 +461,9 @@ export async function applyFillPlan(
       // Read the question before answering it. Filling a two-line eligibility
       // question as fast as a first-name box is not a timing any person
       // produces, and the pause costs a fraction of a second.
-      await sleep(readingPauseMs(field.label, persona))
+      // Reading the question. The pointer drifts while it happens, because a
+      // frozen cursor through every pause is its own signature.
+      await driftDuring(readingPauseMs(field.label, persona))
 
       let wrote = false
       // A ticked checkbox group is judged by the boxes, not by re-reading a

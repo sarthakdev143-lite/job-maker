@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { humanClick, readingPauseMs } from '@/human/pointer'
+import { driftDuring, humanClick, readingPauseMs } from '@/human/pointer'
 import { derivePersona, resetPersonaCache } from '@/human/persona'
 import { fatigueMultiplier, maybeMicroBreak, nextGap } from '@/human/pacing'
 import { seededRng } from '@/human/rng'
@@ -121,5 +121,28 @@ describe('session pacing', () => {
     expect(gap.ms).toBeGreaterThanOrEqual(base.min)
     expect(gap.ms).toBeLessThanOrEqual(base.max)
     expect(gap.reason).toMatch(/before the next application/)
+  })
+})
+
+describe('driftDuring', () => {
+  it('moves the pointer while the agent is reading, and stops on time', async () => {
+    document.body.innerHTML = '<div style="height:2000px">a form</div>'
+    let moves = 0
+    document.addEventListener('mousemove', () => moves++, true)
+
+    const started = Date.now()
+    await driftDuring(700, seededRng(4))
+    const elapsed = Date.now() - started
+
+    expect(moves).toBeGreaterThan(0)
+    expect(elapsed).toBeGreaterThanOrEqual(600)
+    expect(elapsed).toBeLessThan(1600)
+  })
+
+  it('does nothing at all when there is no pause to fill', async () => {
+    let moves = 0
+    document.addEventListener('mousemove', () => moves++, true)
+    await driftDuring(0, seededRng(1))
+    expect(moves).toBe(0)
   })
 })
