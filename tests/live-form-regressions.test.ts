@@ -276,3 +276,19 @@ describe('a form that refuses in prose', () => {
     expect(outlinePage(document, 'https://example.com/x').problems ?? []).toEqual([])
   })
 })
+
+describe('leaving a field', () => {
+  it('presses Tab before blurring, which is when many forms validate', async () => {
+    document.body.innerHTML = `<label for="e">Email</label><input id="e" type="email" name="email" />`
+    const el = document.getElementById('e') as HTMLInputElement
+    const seen: string[] = []
+    el.addEventListener('keydown', (e) => seen.push(`keydown:${(e as KeyboardEvent).key}`))
+    el.addEventListener('blur', () => seen.push('blur'))
+
+    await applyFillPlan([plan('#e', 'Email', 'email', 'nitish@example.com')], { min: 1, max: 2 })
+
+    expect(seen).toContain('keydown:Tab')
+    expect(seen.indexOf('keydown:Tab')).toBeLessThan(seen.indexOf('blur'))
+    expect(el.value).toBe('nitish@example.com')
+  })
+})

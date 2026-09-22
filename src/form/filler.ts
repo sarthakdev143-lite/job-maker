@@ -16,11 +16,14 @@
  */
 
 import { resolveSelector } from './selector'
+import { createLogger } from '@/shared/logger'
 import { normalizeText, similarity } from '@/shared/text'
 import { personaForPage, type Persona } from '@/human/persona'
 import { typeInto, typingOptionsFor } from '@/human/typing'
 import { humanClick, humanScrollTo, readingPauseMs } from '@/human/pointer'
 import type { FilledField } from '@/storage/schemas'
+
+const log = createLogger('filler')
 
 const TRUTHY = new Set(['true', 'yes', 'y', '1', 'on', 'checked'])
 
@@ -78,6 +81,28 @@ function typingBudgetFor(value: string): number {
 
 /* --------------------------------------------------------------- writers */
 
+
+/**
+ * Leave a field the way a person does: Tab, then blur.
+ *
+ * Plenty of ATS forms validate a field on the Tab keydown rather than on blur,
+ * and show their complaint only once you have moved on -- an agent that jumps
+ * straight to the next selector never triggers that, so a value the site would
+ * have rejected sits there looking accepted until the submit button refuses.
+ * It is also simply what leaving a field looks like from the page's side.
+ */
+function tabAway(el: HTMLElement): void {
+  const init: KeyboardEventInit = { key: 'Tab', code: 'Tab', keyCode: 9, which: 9, bubbles: true, cancelable: true }
+  try {
+    el.dispatchEvent(new KeyboardEvent('keydown', init))
+    el.dispatchEvent(new KeyboardEvent('keyup', init))
+  } catch {
+    // A DOM that cannot build the event is no reason to skip the blur.
+  }
+  el.blur()
+  fire(el, 'blur')
+}
+
 async function fillText(
   el: HTMLInputElement | HTMLTextAreaElement,
   value: string,
@@ -85,15 +110,13 @@ async function fillText(
 ): Promise<void> {
   await approach(el)
   await typeInto(el, value, typingOptionsFor(persona, { budgetMs: typingBudgetFor(value) }))
-  el.blur()
-  fire(el, 'blur')
+  tabAway(el)
 }
 
 async function fillContentEditable(el: HTMLElement, value: string, persona: Persona): Promise<void> {
   await approach(el)
   await typeInto(el, value, typingOptionsFor(persona, { budgetMs: typingBudgetFor(value) }))
-  el.blur()
-  fire(el, 'blur')
+  tabAway(el)
 }
 
 /** Match a select option by exact value, exact label, then fuzzy label. */
@@ -409,18 +432,6 @@ function verifyValue(el: HTMLElement, expected: string, kind: string, doc: Docum
   return similarity(a, b) >= 0.8
 }
 
-/**
- * Note, for the log, that a field needed the dropdown treatment. Kept as a
- * separate hook so the content script stays free of storage imports.
- */
-async function applicationsNote(label: string): Promise<void> {
-  try {
-    console.debug(`[autoapply] "${label}" only accepted a value chosen from its dropdown`)
-  } catch {
-    // Logging is never worth failing a fill over.
-  }
-}
-
 /* ------------------------------------------------------------------ entry */
 
 export type FillOutcome = { filled: FilledField[]; failed: FilledField[] }
@@ -528,7 +539,7 @@ export async function applyFillPlan(
         const picked = await fillCombobox(el, field.value, doc, persona)
         verified = picked && Boolean(readBack(el, doc).trim())
         if (verified) {
-          await applicationsNote(field.label)
+          log.debug(`"${field.label}" only accepted a value chosen from its dropdown`)
         }
       }
       const record: FilledField = { ...field, verified, error: verified ? '' : wrote ? 'value did not stick' : 'no writer matched' }
