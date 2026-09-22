@@ -1172,16 +1172,39 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       reason: `submitted but not confirmed - ${verdict.detail}`,
       outline: await outlineOf(tab),
     })
+    // A site that refused the submission outright will refuse it again on a
+    // retry: Greenhouse, Lever and Ashby all score the session, and no amount of
+    // re-clicking changes their mind. The application is complete, so the useful
+    // thing is to put it in front of the user with one button left.
+    const refused = verdict.signal === 'refused'
+    if (refused) {
+      const shown = await handOver(
+        tab,
+        'Submit this one by hand',
+        `${job.title} at ${job.company}: ${adapter.label} would not accept it automatically. The form is filled in.`
+      )
+      if (shown) {
+        await applicationsRepo.addTimeline(application.id, 'handoff', 'refused by the site; left on screen for you')
+        tab = null
+      }
+    }
+
     const updated = await applicationsRepo.update(application.id, {
       status: 'needs_review',
-      error: `submitted but not confirmed - ${verdict.detail}`,
+      error: refused
+        ? `${adapter.label} refused the submission: ${verdict.detail}`
+        : `submitted but not confirmed - ${verdict.detail}`,
     })
-    if (settings.autonomy.notifyOnReviewNeeded) {
+    if (settings.autonomy.notifyOnReviewNeeded && !refused) {
       notify('Application needs review', `${job.title} at ${job.company}: ${verdict.signal}`)
     }
     return {
       application: updated!,
-      decision: { action: 'review', reasons: [`submission unconfirmed: ${verdict.signal}`] },
+      decision: {
+        action: 'review',
+        reasons: [refused ? `${adapter.label} refused the submission` : `submission unconfirmed: ${verdict.signal}`],
+        handoff: refused,
+      },
       submitted: false,
     }
   } catch (e) {

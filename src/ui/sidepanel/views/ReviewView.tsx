@@ -58,6 +58,8 @@ function ReviewCard({ application, onChanged }: { application: Application; onCh
   const ordered = useMemo(() => orderFields(application), [application])
   const unresolvedRequired = application.unresolved.filter((f) => f.required).length
   const failedCount = application.fillPlan.filter((f) => f.error).length
+  /** The site declined an automated submission; a person has to press submit. */
+  const refused = /refused the submission/i.test(application.error ?? '')
 
   const submit = () => {
     const merged: FilledField[] = [
@@ -108,8 +110,38 @@ function ReviewCard({ application, onChanged }: { application: Application; onCh
         {unresolvedRequired > 0 && <Badge tone="bad">{unresolvedRequired} required unanswered</Badge>}
         {failedCount > 0 && <Badge tone="warn">{failedCount} did not stick</Badge>}
         {application.matchScore !== null && <Badge>match {application.matchScore}</Badge>}
-        {application.error && <Badge tone="bad">{application.error.slice(0, 60)}</Badge>}
+        {application.error && !refused && <Badge tone="bad">{application.error.slice(0, 60)}</Badge>}
       </div>
+
+      {/*
+        A refusal is not a mistake to fix, so it does not belong in the same row
+        as "3 required unanswered". The site declined an automated submission --
+        every answer is already in the form, and the only thing left is a person
+        pressing the button. Say that, quote the site, and open the page.
+      */}
+      {refused && (
+        <div
+          className="mt-2 rounded-md px-2.5 py-2 text-[11.5px]"
+          style={{ background: 'color-mix(in srgb, var(--warn) 12%, transparent)' }}
+        >
+          <div style={{ color: 'var(--warn)' }}>{application.error}</div>
+          <p className="mt-1" style={{ color: 'var(--ink-faint)' }}>
+            Everything was filled in and the documents attached. This board checks whether a person is driving
+            the browser, so the last click has to be yours.
+          </p>
+          {application.url && (
+            <button
+              className="btn btn-primary mt-2"
+              onClick={(e) => {
+                e.stopPropagation()
+                void chrome.tabs.create({ url: application.url })
+              }}
+            >
+              Open the form and finish it
+            </button>
+          )}
+        </div>
+      )}
 
       {open && (
         <div className="mt-3">
