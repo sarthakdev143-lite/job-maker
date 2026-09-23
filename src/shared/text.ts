@@ -81,6 +81,7 @@ export function normalizeQuestion(input: string): string {
   s = s.replace(/\(([^)]*)\)/g, ' $1 ') // unwrap parentheticals, keep contents
   s = s.replace(/\b(required|optional|mandatory)\b/g, ' ')
   s = s.replace(/[*:?.,!;]/g, ' ')
+  s = s.replace(/(\d)\s*\+/g, '$1') // "5+ years" and "5 years" are one requirement, not two
   s = s.replace(/[^a-z0-9+#/\- ]/g, ' ')
   const tokens = s
     .split(/\s+/)
@@ -112,6 +113,72 @@ export function similarity(a: string, b: string): number {
   // Containment bonus: "first name" inside "legal first name" should score high.
   const containment = inter / Math.min(A.size, B.size)
   return Math.max(jaccard, containment * 0.92)
+}
+
+/**
+ * Words that flip a question's answer rather than refine it.
+ *
+ * `similarity` is deliberately generous, because an option list is full of
+ * near-misses that mean the same thing. A question bank is not: "do you require
+ * sponsorship" and "do you not require sponsorship" differ by one token and
+ * take opposite answers, and reusing the stored Yes is worse than asking.
+ */
+const POLARITY = new Set([
+  'not', "n't", 'no', 'never', 'without', 'non', 'cannot', 'unable', 'unwilling',
+  'except', 'excluding', 'excluded', 'ineligible', 'neither', 'nor', 'lacking',
+])
+
+function polarityOf(tokens: Set<string>): string {
+  const found: string[] = []
+  for (const t of tokens) if (POLARITY.has(t)) found.push(t)
+  return found.sort().join(' ')
+}
+
+/**
+ * The numbers a question contains, as numbers.
+ *
+ * "5+ years" and "5 years" are the same requirement written two ways, so the
+ * comparison is on the digit runs rather than the tokens holding them.
+ */
+function digitsOf(tokens: Set<string>): string {
+  const found: string[] = []
+  for (const t of tokens) for (const n of t.match(/\d+/g) ?? []) found.push(String(Number(n)))
+  return found.sort().join(' ')
+}
+
+/**
+ * How alike two form *questions* are, in [0,1].
+ *
+ * This is stricter than `similarity`, and the two must stay separate. Matching
+ * a value against an option list wants to be forgiving -- "India" should find
+ * "India +91" -- whereas reusing a stored answer on the strength of a partial
+ * match is how a bank filled "Name of your most recent employer" with the
+ * applicant's own name. Two rules do the work:
+ *
+ *   - the containment bonus decays with the length ratio, so a short question
+ *     swallowed by a much longer one no longer scores as a near-identity;
+ *   - polarity and numbers must agree, since a question that differs only by
+ *     "not", or only by "5 years" against "10 years", has a different answer
+ *     and not a similar one.
+ *
+ * Anything blocked here falls through to the model, which still answers it, so
+ * the cost of being strict is one call rather than an empty box.
+ */
+export function questionSimilarity(a: string, b: string): number {
+  const A = tokenSet(a)
+  const B = tokenSet(b)
+  if (A.size === 0 || B.size === 0) return 0
+  if (polarityOf(A) !== polarityOf(B)) return 0
+
+  let inter = 0
+  for (const t of A) if (B.has(t)) inter++
+  const union = A.size + B.size - inter
+  const jaccard = inter / union
+  if (digitsOf(A) !== digitsOf(B)) return jaccard
+
+  const containment = inter / Math.min(A.size, B.size)
+  const ratio = Math.min(A.size, B.size) / Math.max(A.size, B.size)
+  return Math.max(jaccard, containment * (0.6 + 0.32 * ratio))
 }
 
 export function bestMatch<T>(

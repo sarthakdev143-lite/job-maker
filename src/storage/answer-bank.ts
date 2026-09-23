@@ -9,7 +9,7 @@
  */
 
 import { answersRepo } from './db'
-import { normalizeQuestion, similarity } from '@/shared/text'
+import { normalizeQuestion, questionSimilarity, similarity } from '@/shared/text'
 import { uid } from '@/shared/util'
 import type { AnswerBankEntry, Profile } from './schemas'
 
@@ -52,7 +52,7 @@ export async function lookup(label: string, scope = ''): Promise<BankHit | null>
 
   let best: BankHit | null = null
   for (const entry of eligible) {
-    const score = similarity(q, entry.qNormalized)
+    const score = questionSimilarity(q, entry.qNormalized)
     if (score >= FUZZY_THRESHOLD && (!best || score > best.confidence)) {
       best = { entry, confidence: Math.min(score, FUZZY_CONFIDENCE_CAP), kind: 'fuzzy' }
     }
