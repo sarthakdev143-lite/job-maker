@@ -556,6 +556,31 @@ async function rememberApplySelector(url: string, selector: string, text: string
 
 /* ------------------------------------------------------------- the machine */
 
+/**
+ * Where a page's answers came from, in one line.
+ *
+ * The distinction that matters in a log is free against paid: "13 fields — 9
+ * profile, 3 bank, 1 model" tells you at a glance whether the answer bank is
+ * doing its job on this site, which a field count alone never did.
+ */
+function tierSummary(plan: FilledField[]): string {
+  const names: Record<string, string> = {
+    user: 'yours',
+    adapter: 'adapter',
+    profile: 'profile',
+    answer_bank: 'bank',
+    llm: 'model',
+    guess: 'guessed',
+    default: 'generated',
+  }
+  const counts = new Map<string, number>()
+  for (const f of plan) {
+    const name = names[f.source] ?? f.source
+    counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  return [...counts.entries()].map(([name, n]) => `${n} ${name}`).join(', ')
+}
+
 export async function applyToJob(jobId: string, options: ApplyOptions = {}): Promise<ApplyOutcome> {
   const step = (name: string, detail = '') => {
     options.onStep?.(name, detail)
@@ -860,7 +885,25 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       }
     }
 
-    await ensureDocs(needsResume, needsCover)
+    // A document failure must not cost the application.
+    //
+    // Everything below this line works without the model: the profile, the
+    // vendor adapter and the answer bank answered 31 of the last 32 fields
+    // between them. Letting a failed cover letter throw here meant a model
+    // outage stopped forms being filled at all, which is the opposite of what
+    // should happen -- the form still gets filled, and whatever could not be
+    // produced is recorded on the timeline where it can be seen.
+    try {
+      await ensureDocs(needsResume, needsCover)
+    } catch (e) {
+      await applicationsRepo.addTimeline(
+        application.id,
+        'documents',
+        `could not be prepared: ${errorMessage(e)}; filling the form anyway`,
+        'warn'
+      )
+      log.warn(`Documents unavailable for ${job.title}: ${errorMessage(e)}`, undefined, job.id)
+    }
 
     // --- fill, one page at a time -----------------------------------------
     const allPlan: FilledField[] = []
@@ -896,7 +939,7 @@ export async function applyToJob(jobId: string, options: ApplyOptions = {}): Pro
       confidence = Math.min(confidence, resolved.confidence)
 
       if (resolved.plan.length > 0) {
-        step('filling the form', `${resolved.plan.length} field(s), typed one at a time`)
+        step('filling the form', `${resolved.plan.length} field(s) — ${tierSummary(resolved.plan)}`)
         const fill = (
           await callAgent<Extract<FormResponse, { type: 'form:fill' }>>(tab, {
             type: 'form:fill',
@@ -1359,13 +1402,28 @@ export async function submitApprovedApplication(
 
 /* ---------------------------------------------------------------- helpers */
 
-async function harvestStep(tab: WorkerTab): Promise<{ fields: FieldDescriptor[]; multiStep: boolean }> {
-  const res = await withTimeout(
-    callAgent<Extract<FormResponse, { type: 'form:harvest' }>>(tab, { type: 'form:harvest' }),
-    20000,
-    'harvest'
-  )
-  return { fields: res.fields, multiStep: res.multiStep }
+/**
+ * Read the fields on screen, giving a client-rendered form time to appear.
+ *
+ * "Loaded" means the document finished, not that React has mounted anything.
+ * Ashby renders its whole application after load and without a `<form>` element
+ * at all, so a single look three seconds in found nothing and the run reported
+ * a page with no fields -- on a page that was about to have fourteen. One more
+ * look a second and a half later costs nothing on a page that was ready.
+ */
+async function harvestStep(tab: WorkerTab, attempts = 3): Promise<{ fields: FieldDescriptor[]; multiStep: boolean }> {
+  let last: { fields: FieldDescriptor[]; multiStep: boolean } = { fields: [], multiStep: false }
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const res = await withTimeout(
+      callAgent<Extract<FormResponse, { type: 'form:harvest' }>>(tab, { type: 'form:harvest' }),
+      20000,
+      'harvest'
+    )
+    last = { fields: res.fields, multiStep: res.multiStep }
+    if (last.fields.length > 0) return last
+    if (attempt < attempts - 1) await sleep(1500)
+  }
+  return last
 }
 
 async function verifySubmission(tab: WorkerTab): Promise<FormVerifyResult> {
