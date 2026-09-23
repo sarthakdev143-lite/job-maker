@@ -24,7 +24,58 @@ function anyMatch(haystack: string, needles: string[]): string | null {
   return null
 }
 
-export function prefilter(job: Job, rules: MatchRules): PrefilterVerdict {
+
+/** Words that mean "remote from anywhere", with no country attached. */
+const GLOBAL_REMOTE = /\b(global|worldwide|anywhere|distributed|international)\b/
+
+/**
+ * Could someone living in one of `eligible` take this remote role?
+ *
+ * A location of plain "Remote" says nothing about geography and is treated as
+ * open; one that names places has to name a place the user can work from.
+ */
+/**
+ * Regions that contain a country, so a role open to one is open to the other.
+ *
+ * "Remote - APAC" is open to someone in India, and rejecting it because the
+ * word "India" does not appear loses exactly the postings that suit a candidate
+ * outside the usual US and EU hiring zones. Only unambiguous groupings are
+ * listed: a region whose boundaries nobody agrees on is worth more as a missed
+ * filter than as a wrong one.
+ */
+const REGIONS: Record<string, string[]> = {
+  apac: ['india', 'singapore', 'australia', 'japan', 'indonesia', 'malaysia', 'philippines', 'vietnam', 'new zealand'],
+  'asia pacific': ['india', 'singapore', 'australia', 'japan', 'indonesia', 'malaysia', 'philippines', 'vietnam'],
+  asia: ['india', 'singapore', 'japan', 'indonesia', 'malaysia', 'philippines', 'vietnam', 'thailand'],
+  emea: ['united kingdom', 'germany', 'france', 'spain', 'netherlands', 'poland', 'israel', 'south africa', 'uae'],
+  europe: ['united kingdom', 'germany', 'france', 'spain', 'netherlands', 'poland', 'ireland', 'portugal'],
+  amer: ['united states', 'canada', 'mexico', 'brazil', 'argentina'],
+  americas: ['united states', 'canada', 'mexico', 'brazil', 'argentina'],
+  latam: ['brazil', 'argentina', 'mexico', 'colombia', 'chile'],
+}
+
+export function remoteOpenTo(location: string, eligible: string[]): boolean {
+  const loc = normalizeText(location)
+  if (!loc) return true
+  if (GLOBAL_REMOTE.test(loc)) return true
+
+  // Strip the remote words and see whether anything geographic is left.
+  const rest = loc.replace(/\b(remote|hybrid|on[- ]?site|work from home|wfh)\b/g, ' ').replace(/[(),|/·-]/g, ' ').trim()
+  if (!rest) return true
+
+  const places = eligible.map((p) => normalizeText(p)).filter((p) => p.length > 1)
+  if (places.some((p) => rest.includes(p))) return true
+
+  // A region the applicant's country belongs to counts as naming it.
+  for (const [region, members] of Object.entries(REGIONS)) {
+    if (!rest.includes(region)) continue
+    if (places.some((p) => members.includes(p))) return true
+  }
+
+  return false
+}
+
+export function prefilter(job: Job, rules: MatchRules, applicantTitles: string[] = []): PrefilterVerdict {
   const title = job.title ?? ''
   const description = job.descriptionText ?? ''
   const company = job.company ?? ''
@@ -68,6 +119,12 @@ export function prefilter(job: Job, rules: MatchRules): PrefilterVerdict {
     if (!anyMatch(job.location || '', rules.locations)) {
       return { pass: false, reason: `location "${job.location}" not in allowed list` }
     }
+  }
+
+  // A remote role is usually remote *within somewhere*. Honour that boundary
+  // when the user has said where they can work from.
+  if (workMode === 'remote' && rules.remoteEligibility.length > 0 && !remoteOpenTo(job.location, rules.remoteEligibility)) {
+    return { pass: false, reason: `remote, but restricted to "${job.location}"` }
   }
 
   const seniority = detectSeniority(title, description)

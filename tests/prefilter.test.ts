@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { enrichJob, prefilter } from '@/matching/prefilter'
+import { enrichJob, prefilter, remoteOpenTo } from '@/matching/prefilter'
 import { JobSchema, MatchRulesSchema, type Job, type MatchRules } from '@/storage/schemas'
 import { dedupeHash } from '@/discovery/sources/ats-apis'
 import { detectWorkMode } from '@/shared/text'
@@ -146,12 +146,69 @@ describe('work mode from the location field', () => {
   })
 
   it('prefers hybrid when the location says so', () => {
-    expect(detectWorkMode('Engineer, fully remote culture', 'Bangalore, India Â· Hybrid')).toBe('hybrid')
+    expect(detectWorkMode('Engineer, fully remote culture', 'Bangalore, India · Hybrid')).toBe('hybrid')
   })
 
   it('falls back to the description when there is no location', () => {
     expect(detectWorkMode('Backend Engineer, work from home', '')).toBe('remote')
     expect(detectWorkMode('Backend Engineer, in-office role', '')).toBe('onsite')
     expect(detectWorkMode('Backend Engineer', '')).toBe('unknown')
+  })
+})
+
+describe('remote eligibility', () => {
+  const eligible = ['India']
+
+  it('keeps a role open to anywhere', () => {
+    expect(remoteOpenTo('Remote, Global', eligible)).toBe(true)
+    expect(remoteOpenTo('Remote - Worldwide', eligible)).toBe(true)
+    expect(remoteOpenTo('Distributed', eligible)).toBe(true)
+    expect(remoteOpenTo('Remote', eligible)).toBe(true)
+    expect(remoteOpenTo('', eligible)).toBe(true)
+  })
+
+  it('keeps a role open where the user actually is', () => {
+    expect(remoteOpenTo('Remote - India', eligible)).toBe(true)
+    expect(remoteOpenTo('India - Remote', eligible)).toBe(true)
+  })
+
+  it('drops a role restricted to somewhere else', () => {
+    expect(remoteOpenTo('Remote - US', eligible)).toBe(false)
+    expect(remoteOpenTo('Remote, Japan', eligible)).toBe(false)
+    expect(remoteOpenTo('Australia (Remote)', eligible)).toBe(false)
+    expect(remoteOpenTo('Remote, Poland; Remote, United Kingdom', eligible)).toBe(false)
+  })
+
+  it('does nothing when the user has not said where they can work', () => {
+    const job1 = job({ location: 'Remote - US', workMode: 'remote' })
+    expect(prefilter(job1, rules({ workModes: ['remote'] })).pass).toBe(true)
+  })
+
+  it('rejects an ineligible remote job through the prefilter', () => {
+    const job1 = job({ location: 'Remote - US', workMode: 'remote' })
+    const verdict = prefilter(job1, rules({ workModes: ['remote'], remoteEligibility: ['India'] }))
+    expect(verdict.pass).toBe(false)
+    if (!verdict.pass) expect(verdict.reason).toMatch(/restricted/i)
+  })
+})
+
+describe('remote eligibility by region', () => {
+  const eligible = ['India']
+
+  it('keeps a role open to the region the applicant is in', () => {
+    expect(remoteOpenTo('Remote - APAC', eligible)).toBe(true)
+    expect(remoteOpenTo('Asia Pacific (Remote)', eligible)).toBe(true)
+    expect(remoteOpenTo('Remote, Asia', eligible)).toBe(true)
+  })
+
+  it('still drops a region the applicant is not in', () => {
+    expect(remoteOpenTo('Remote - EMEA', eligible)).toBe(false)
+    expect(remoteOpenTo('Remote, LATAM', eligible)).toBe(false)
+    expect(remoteOpenTo('AMER - Remote', eligible)).toBe(false)
+  })
+
+  it('reads regions for someone in Europe too', () => {
+    expect(remoteOpenTo('Remote - EMEA', ['Germany'])).toBe(true)
+    expect(remoteOpenTo('Remote - APAC', ['Germany'])).toBe(false)
   })
 })

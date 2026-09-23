@@ -140,6 +140,16 @@ export const MatchRulesSchema = z.object({
   companyBlocklist: z.array(z.string()).default([]),
   companyAllowlist: z.array(z.string()).default([]),
   locations: z.array(z.string()).default([]),
+  /**
+   * Places the user may actually work from, for remote roles.
+   *
+   * "Remote" is not the same as "remote for you". A sweep that correctly kept
+   * only remote jobs still filled up with "Remote - US", "Remote, Japan" and
+   * "Remote - Netherlands", none of which an applicant in India can take. When
+   * this is set, a remote role has to be open somewhere on this list, or be
+   * advertised as global, to survive. Empty means no eligibility check at all.
+   */
+  remoteEligibility: z.array(z.string()).default([]),
   workModes: z.array(WorkModeSchema).default(['remote', 'hybrid', 'onsite', 'unknown']),
   /**
    * Levels worth applying to, by default everything below management.

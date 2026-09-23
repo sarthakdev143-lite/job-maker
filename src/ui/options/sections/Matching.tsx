@@ -118,6 +118,21 @@ export default function MatchingSection({
           <Field label="Only these companies" hint="When set, everything else is rejected.">
             <ListInput value={rules.companyAllowlist} onChange={(v) => setRules({ companyAllowlist: v })} rows={3} />
           </Field>
+          <Field
+            label="I can work remotely from"
+            hint={
+              'Countries you are eligible to work from. "Remote" usually means remote within somewhere: ' +
+              'a search that correctly kept only remote roles still filled up with "Remote - US" and ' +
+              '"Remote, Japan". Leave empty to accept every remote role regardless of where it is open.'
+            }
+          >
+            <ListInput
+              value={rules.remoteEligibility}
+              onChange={(v) => setRules({ remoteEligibility: v })}
+              rows={2}
+            />
+          </Field>
+
           <Field label="Acceptable locations" hint="Ignored for remote roles.">
             <ListInput value={rules.locations} onChange={(v) => setRules({ locations: v })} rows={3} />
           </Field>
