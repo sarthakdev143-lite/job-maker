@@ -63,7 +63,7 @@ export function makeJob(input: {
     company: input.company.trim(),
     title: input.title.trim(),
     location: input.location.trim(),
-    workMode: detectWorkMode(`${input.title} ${input.location} ${description.slice(0, 1500)}`),
+    workMode: detectWorkMode(description.slice(0, 1500), input.location, input.title),
     salaryText: input.salaryText ?? '',
     salaryMin: salary.min,
     salaryMax: salary.max,

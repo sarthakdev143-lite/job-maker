@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { enrichJob, prefilter } from '@/matching/prefilter'
 import { JobSchema, MatchRulesSchema, type Job, type MatchRules } from '@/storage/schemas'
 import { dedupeHash } from '@/discovery/sources/ats-apis'
+import { detectWorkMode } from '@/shared/text'
 
 function job(overrides: Partial<Job> = {}): Job {
   return JobSchema.parse({
@@ -128,5 +129,29 @@ describe('enrichJob', () => {
     expect(enriched.workMode).toBe('remote')
     expect(enriched.salaryMin).toBe(140000)
     expect(enriched.salaryMax).toBe(180000)
+  })
+})
+
+describe('work mode from the location field', () => {
+  it('does not call a San Francisco job remote because the advert says "distributed team"', () => {
+    expect(
+      detectWorkMode('Staff Software Engineer. We are a distributed team that works remote-first.', 'San Francisco')
+    ).toBe('onsite')
+  })
+
+  it('reads the location when it says remote', () => {
+    expect(detectWorkMode('Staff Engineer', 'India - Remote')).toBe('remote')
+    expect(detectWorkMode('Solutions Architect', 'USA | Remote')).toBe('remote')
+    expect(detectWorkMode('Deployed Architect', 'Remote - Singapore')).toBe('remote')
+  })
+
+  it('prefers hybrid when the location says so', () => {
+    expect(detectWorkMode('Engineer, fully remote culture', 'Bangalore, India Â· Hybrid')).toBe('hybrid')
+  })
+
+  it('falls back to the description when there is no location', () => {
+    expect(detectWorkMode('Backend Engineer, work from home', '')).toBe('remote')
+    expect(detectWorkMode('Backend Engineer, in-office role', '')).toBe('onsite')
+    expect(detectWorkMode('Backend Engineer', '')).toBe('unknown')
   })
 })

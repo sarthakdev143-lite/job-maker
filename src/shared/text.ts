@@ -156,15 +156,47 @@ export function detectSeniority(title: string, description = ''): Seniority {
   return 'unknown'
 }
 
-export function detectWorkMode(text: string): WorkMode {
-  const t = normalizeText(text)
-  const hybrid = /\bhybrid\b/.test(t)
-  const remote = /\b(remote|work from home|wfh|distributed|anywhere)\b/.test(t)
-  const onsite = /\b(on[- ]?site|in[- ]office|in person)\b/.test(t)
-  if (hybrid) return 'hybrid'
-  if (remote && !onsite) return 'remote'
-  if (onsite) return 'onsite'
-  if (remote) return 'remote'
+/**
+ * Is this role remote, hybrid or in an office?
+ *
+ * Evidence in order of how much it is worth. The posting's location field and
+ * its title are deliberate statements about where the job is. The description
+ * is not: a company that calls itself "a distributed team" in its culture
+ * paragraph made every one of its San Francisco roles look remote, which is how
+ * a remote-only search filled up with jobs in California.
+ *
+ * So the description only carries the day when it says something unambiguous
+ * about *this role* -- "fully remote", "remote position", "work from home" --
+ * rather than merely containing the word somewhere.
+ */
+const HYBRID = /\bhybrid\b/
+const REMOTE_ANY = /\b(remote|work from home|wfh|anywhere|distributed)\b/
+const REMOTE_EXPLICIT =
+  /\b((fully|100%|completely|entirely|permanently)\s+remote|remote[- ](position|role|job|opportunity|based)|work from home|this (role|position) is remote)\b/
+const ONSITE = /\b(on[- ]?site|in[- ]office|in person)\b/
+
+export function detectWorkMode(description: string, location = '', title = ''): WorkMode {
+  const loc = normalizeText(location)
+  if (loc) {
+    if (HYBRID.test(loc)) return 'hybrid'
+    if (REMOTE_ANY.test(loc)) return 'remote'
+  }
+
+  const head = normalizeText(title)
+  if (head) {
+    if (HYBRID.test(head)) return 'hybrid'
+    if (REMOTE_ANY.test(head)) return 'remote'
+  }
+
+  const body = normalizeText(description)
+  if (HYBRID.test(body)) return 'hybrid'
+  if (REMOTE_EXPLICIT.test(body)) return 'remote'
+
+  // A named place, and nothing said this role escapes it.
+  if (loc && /[a-z]/.test(loc)) return 'onsite'
+
+  if (ONSITE.test(body)) return 'onsite'
+  if (REMOTE_ANY.test(body)) return 'remote'
   return 'unknown'
 }
 

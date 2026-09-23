@@ -57,7 +57,7 @@ export function prefilter(job: Job, rules: MatchRules): PrefilterVerdict {
     return { pass: false, reason: 'description matches none of the required keywords' }
   }
 
-  const workMode = job.workMode !== 'unknown' ? job.workMode : detectWorkMode(`${title} ${job.location} ${description}`)
+  const workMode = job.workMode !== 'unknown' ? job.workMode : detectWorkMode(description, job.location, title)
   if (!rules.workModes.includes(workMode)) {
     return { pass: false, reason: `work mode ${workMode} excluded` }
   }
@@ -114,7 +114,7 @@ export function enrichJob(job: Job): Job {
   const workMode =
     job.workMode !== 'unknown'
       ? job.workMode
-      : detectWorkMode(`${job.title} ${job.location} ${job.descriptionText.slice(0, 2000)}`)
+      : detectWorkMode(job.descriptionText.slice(0, 2000), job.location, job.title)
   const salary = parseSalary(job.salaryText || job.descriptionText.slice(0, 1500))
   return {
     ...job,
