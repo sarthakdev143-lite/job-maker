@@ -135,6 +135,83 @@ export const BOARD_CATALOGUE: CatalogueEntry[] = [
   { slug: 'meesho', source: 'lever', tags: [tag.consumer, tag.india] }, // ~1 open
   { slug: 'mindtickle', source: 'lever', tags: [tag.enterprise, tag.india] }, // ~1 open
   { slug: 'zeta', source: 'lever', tags: [tag.fintech, tag.india] }, // ~1 open
+  // Remote-first employers and staffing platforms, added after a remote-only
+  // sweep of the catalogue above returned almost nothing outside the United
+  // States: it leaned heavily on Bay Area AI startups, which advertise offices.
+  // These hire globally or in India, and each was verified live when added.
+  { slug: 'canonical', source: 'greenhouse', tags: [tag.infra, tag.devtools, tag.remote] }, // ~304 open, fully remote company
+  { slug: 'cockroachlabs', source: 'greenhouse', tags: [tag.data, tag.infra, tag.remote] }, // ~21 open
+  { slug: 'circleci', source: 'greenhouse', tags: [tag.devtools, tag.remote] }, // ~14 open
+  { slug: 'instawork', source: 'greenhouse', tags: [tag.consumer, tag.india] }, // ~57 open
+  { slug: 'fleetio', source: 'greenhouse', tags: [tag.enterprise, tag.remote] }, // ~25 open
+  { slug: 'remote', source: 'greenhouse', tags: [tag.remote, tag.enterprise] }, // ~2 open, remote-employment platform
+  { slug: 'toptal', source: 'lever', tags: [tag.remote, tag.enterprise] }, // ~28 open, fully distributed
+  { slug: 'hevodata', source: 'lever', tags: [tag.data, tag.india] }, // ~47 open
+  { slug: 'netomi', source: 'lever', tags: [tag.ai, tag.india] }, // ~23 open
+  { slug: 'oyster', source: 'ashby', tags: [tag.remote, tag.enterprise] }, // ~30 open, distributed by design
+  { slug: 'andela', source: 'ashby', tags: [tag.remote, tag.india] }, // ~17 open, global remote talent
+  { slug: 'zapier', source: 'ashby', tags: [tag.devtools, tag.remote] }, // ~7 open, fully remote company
+  { slug: 'close', source: 'ashby', tags: [tag.enterprise, tag.remote] }, // ~7 open, fully remote company
+  // Data and developer infrastructure, verified live. This is the segment a
+  // polyglot backend or platform profile matches most often, and the catalogue
+  // barely covered it: it was heavy on model labs and light on the companies
+  // that build the systems underneath them.
+  { slug: 'snowflake', source: 'ashby', tags: [tag.data, tag.enterprise, tag.india] }, // ~345 open
+  { slug: 'fivetran', source: 'greenhouse', tags: [tag.data, tag.india] }, // ~197 open
+  { slug: 'hightouch', source: 'greenhouse', tags: [tag.data, tag.remote] }, // ~83 open
+  { slug: 'sentry', source: 'ashby', tags: [tag.devtools, tag.infra] }, // ~44 open
+  { slug: 'singlestore', source: 'greenhouse', tags: [tag.data, tag.india] }, // ~40 open
+  { slug: 'starburst', source: 'greenhouse', tags: [tag.data, tag.remote] }, // ~24 open
+  { slug: 'astronomer', source: 'ashby', tags: [tag.data, tag.remote] }, // ~22 open
+  { slug: 'confluent', source: 'ashby', tags: [tag.data, tag.infra, tag.india] }, // ~21 open
+  { slug: 'yugabyte', source: 'greenhouse', tags: [tag.data, tag.india] }, // ~14 open
+  { slug: 'airbyte', source: 'ashby', tags: [tag.data, tag.remote] }, // ~13 open
+  { slug: 'planetscale', source: 'greenhouse', tags: [tag.data, tag.infra] }, // ~13 open
+  { slug: 'prefect', source: 'ashby', tags: [tag.data, tag.remote] }, // ~8 open
+  { slug: 'dremio', source: 'greenhouse', tags: [tag.data] }, // ~6 open
+  { slug: 'influxdata', source: 'ashby', tags: [tag.data, tag.remote] }, // ~3 open
+  { slug: 'materialize', source: 'ashby', tags: [tag.data, tag.remote] }, // ~2 open
+  // India-based employers and a few remote-friendly product companies, verified
+  // live. An India-remote search is limited by how many Indian employers the
+  // catalogue knows about, not by how much of the Bay Area it covers.
+  { slug: 'paytm', source: 'lever', tags: [tag.fintech, tag.india] }, // ~202 open
+  { slug: 'mixpanel', source: 'greenhouse', tags: [tag.data, tag.remote] }, // ~87 open
+  { slug: 'amplitude', source: 'greenhouse', tags: [tag.data, tag.remote] }, // ~38 open
+  { slug: 'algolia', source: 'greenhouse', tags: [tag.devtools, tag.remote] }, // ~34 open
+  { slug: 'strava', source: 'ashby', tags: [tag.consumer, tag.remote] }, // ~31 open
+  { slug: 'cloudinary', source: 'lever', tags: [tag.devtools, tag.remote] }, // ~10 open
+
+  // Verified live on 2026-09-21, all remote-first or remote-friendly.
+  //
+  // None of these had a posting open to India on the day they were added, which
+  // used to be a reason to leave a board out and no longer is: boards are now
+  // ranked by how many postings suit the applicant *at the time of the sweep*,
+  // so a board with nothing this week simply sorts to the bottom and costs one
+  // HTTP request. What matters is that these companies hire remotely at all,
+  // which the ones above were originally chosen for too.
+  { slug: 'netlify', source: 'greenhouse', tags: [tag.devtools, tag.infra, tag.remote] },
+  { slug: 'newrelic', source: 'greenhouse', tags: [tag.infra, tag.india] },
+  { slug: 'okta', source: 'greenhouse', tags: [tag.security, tag.enterprise, tag.india] },
+  { slug: 'jfrog', source: 'greenhouse', tags: [tag.devtools, tag.infra, tag.india] },
+  { slug: 'honeycomb', source: 'greenhouse', tags: [tag.infra, tag.devtools, tag.remote] },
+  { slug: 'buildkite', source: 'greenhouse', tags: [tag.devtools, tag.remote] },
+  { slug: 'duolingo', source: 'greenhouse', tags: [tag.consumer, tag.ai] },
+  { slug: 'coursera', source: 'greenhouse', tags: [tag.consumer, tag.india] },
+  { slug: 'udemy', source: 'greenhouse', tags: [tag.consumer, tag.india] },
+  { slug: 'ghost', source: 'greenhouse', tags: [tag.consumer, tag.remote] },
+  { slug: 'make', source: 'greenhouse', tags: [tag.devtools, tag.remote] },
+  { slug: 'invisible', source: 'greenhouse', tags: [tag.ai, tag.remote] },
+  { slug: '1password', source: 'ashby', tags: [tag.security, tag.remote] },
+  { slug: 'clickup', source: 'ashby', tags: [tag.enterprise, tag.remote] },
+  { slug: 'miro', source: 'ashby', tags: [tag.enterprise, tag.remote] },
+  { slug: 'mural', source: 'ashby', tags: [tag.enterprise, tag.remote] },
+  { slug: 'buffer', source: 'ashby', tags: [tag.consumer, tag.remote] },
+  { slug: 'inngest', source: 'ashby', tags: [tag.devtools, tag.infra, tag.remote] },
+  { slug: 'sisu', source: 'ashby', tags: [tag.data, tag.ai] },
+  { slug: 'flock', source: 'ashby', tags: [tag.enterprise, tag.india] },
+  { slug: 'fly', source: 'lever', tags: [tag.infra, tag.devtools, tag.remote] },
+  { slug: 'sonarsource', source: 'lever', tags: [tag.devtools, tag.security] },
+  { slug: 'ninjavan', source: 'lever', tags: [tag.enterprise] },
 ]
 
 /* ------------------------------------------------------------- validation */
@@ -144,7 +221,22 @@ export type BoardCheck = {
   source: BoardSource
   live: boolean
   jobCount: number
+  /**
+   * Of this board's open postings, how many are in the place the applicant can
+   * work from. Zero when nothing was asked for.
+   *
+   * Boards were being chosen by how many jobs they had, which is a measure of
+   * company size and nothing else: a sweep of forty boards fetched 3,350
+   * postings and kept seven, because the biggest boards are the ones with the
+   * most offices in California. The board's own listing already says where each
+   * posting is, and it has already been downloaded to check the board exists,
+   * so counting the ones that suit costs nothing.
+   */
+  matchCount: number
 }
+
+/** What a board is being judged against: where the applicant can work. */
+export type BoardInterest = { country?: string; remoteOnly?: boolean }
 
 function boardUrl(entry: CatalogueEntry): string {
   const slug = encodeURIComponent(entry.slug)
@@ -152,7 +244,9 @@ function boardUrl(entry: CatalogueEntry): string {
     case 'greenhouse':
       return `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`
     case 'lever':
-      return `https://api.lever.co/v0/postings/${slug}?mode=json&limit=1`
+      // No `limit`: the whole listing is what makes the per-board match count
+      // possible, and Lever's boards are small enough for that to be cheap.
+      return `https://api.lever.co/v0/postings/${slug}?mode=json`
     case 'ashby':
       return `https://api.ashbyhq.com/posting-api/job-board/${slug}`
   }
@@ -164,17 +258,64 @@ function countJobs(source: BoardSource, payload: unknown): number {
   return Array.isArray(jobs) ? jobs.length : 0
 }
 
-async function checkOne(entry: CatalogueEntry): Promise<BoardCheck> {
+/**
+ * Where each of a board's postings says it is, in one string per posting.
+ *
+ * Each ATS words it differently and none of them is hard to read; the point is
+ * only to get something the country and the word "remote" can be looked for in.
+ */
+function locationsOf(source: BoardSource, payload: unknown): string[] {
+  if (source === 'lever') {
+    const rows = Array.isArray(payload) ? (payload as Array<Record<string, unknown>>) : []
+    return rows.map((r) => {
+      const cats = (r.categories ?? {}) as Record<string, unknown>
+      return [cats.location, r.workplaceType].filter(Boolean).join(' ')
+    })
+  }
+  const rows = ((payload as { jobs?: Array<Record<string, unknown>> } | null)?.jobs ?? []) as Array<
+    Record<string, unknown>
+  >
+  return rows.map((r) => {
+    // Greenhouse nests it, Ashby states it flat and adds its own remote flag.
+    const nested = (r.location ?? {}) as Record<string, unknown>
+    const name = typeof r.location === 'string' ? r.location : (nested.name ?? '')
+    return [name, r.secondaryLocations ? JSON.stringify(r.secondaryLocations) : '', r.isRemote ? 'remote' : '']
+      .filter(Boolean)
+      .join(' ')
+  })
+}
+
+/** How many of a board's postings suit someone with these constraints. */
+function countMatching(locations: string[], interest: BoardInterest): number {
+  const country = (interest.country ?? '').trim().toLowerCase()
+  if (!country && !interest.remoteOnly) return 0
+
+  let n = 0
+  for (const raw of locations) {
+    const where = raw.toLowerCase()
+    const isRemote = /\bremote\b|\banywhere\b|\bdistributed\b/.test(where)
+    const inCountry = country ? where.includes(country) : true
+    // A remote-only applicant needs the posting to be remote; naming their
+    // country as well is better still, but "Remote - Global" counts too.
+    if (interest.remoteOnly ? isRemote && (inCountry || /global|worldwide|anywhere/.test(where)) : inCountry) n++
+  }
+  return n
+}
+
+async function checkOne(entry: CatalogueEntry, interest: BoardInterest): Promise<BoardCheck> {
   try {
     const res = await fetch(boardUrl(entry), { headers: { accept: 'application/json' } })
-    if (!res.ok) return { ...entry, live: false, jobCount: 0 }
+    if (!res.ok) return { ...entry, live: false, jobCount: 0, matchCount: 0 }
     const payload = (await res.json()) as unknown
     const jobCount = countJobs(entry.source, payload)
-    // Lever's limit parameter caps the response, so a single result still means
-    // the board exists; only an empty board is treated as not worth adding.
-    return { ...entry, live: jobCount > 0, jobCount }
+    return {
+      ...entry,
+      live: jobCount > 0,
+      jobCount,
+      matchCount: countMatching(locationsOf(entry.source, payload), interest),
+    }
   } catch {
-    return { ...entry, live: false, jobCount: 0 }
+    return { ...entry, live: false, jobCount: 0, matchCount: 0 }
   }
 }
 
@@ -187,6 +328,7 @@ async function checkOne(entry: CatalogueEntry): Promise<BoardCheck> {
  */
 export async function validateBoards(
   entries: CatalogueEntry[],
+  interest: BoardInterest = {},
   concurrency = 6
 ): Promise<BoardCheck[]> {
   const results: BoardCheck[] = []
@@ -197,7 +339,7 @@ export async function validateBoards(
     while (index < entries.length) {
       const entry = entries[index++]
       if (!entry) break
-      results.push(await checkOne(entry))
+      results.push(await checkOne(entry, interest))
       activity.note(`checking company boards (${++done} of ${entries.length})`)
     }
   })
@@ -205,8 +347,15 @@ export async function validateBoards(
   await Promise.all(workers)
 
   const live = results.filter((r) => r.live)
-  log.info(`Checked ${results.length} board(s): ${live.length} live, ${results.length - live.length} gone`)
-  return results.sort((a, b) => Number(b.live) - Number(a.live) || b.jobCount - a.jobCount)
+  const useful = live.filter((r) => r.matchCount > 0)
+  log.info(
+    `Checked ${results.length} board(s): ${live.length} live, ${results.length - live.length} gone` +
+      (interest.country || interest.remoteOnly ? `, ${useful.length} with a posting you could take` : '')
+  )
+  // Boards you could actually work at come first; total size only breaks ties.
+  return results.sort(
+    (a, b) => Number(b.live) - Number(a.live) || b.matchCount - a.matchCount || b.jobCount - a.jobCount
+  )
 }
 
 /**
@@ -218,14 +367,23 @@ export async function validateBoards(
  */
 export function matchCatalogue(
   keywords: string[],
-  options: { india?: boolean; limit?: number } = {}
+  options: { india?: boolean; remoteOnly?: boolean; limit?: number } = {}
 ): CatalogueEntry[] {
   const haystack = keywords.join(' ').toLowerCase()
-  const wants = (t: string): boolean => haystack.includes(t.split('-')[0] ?? t)
+  const wants = (t: string): boolean => haystack.includes(t.split('-')[0
+] ?? t)
 
   const scored = BOARD_CATALOGUE.map((entry) => {
     let score = 1
     if (options.india && entry.tags.includes('india')) score += 3
+    // Someone who will only take a remote job needs boards that have remote
+    // jobs. Ranking purely on subject matter filled a remote-only search with
+    // Bay Area AI startups, every posting of which names an office -- a sweep
+    // of sixty-eight boards returned nothing at all.
+    if (options.remoteOnly) {
+      if (entry.tags.includes('remote-friendly')) score += 5
+      else if (!entry.tags.includes('india')) score -= 1
+    }
     for (const t of entry.tags) if (wants(t)) score += 2
     if (/\b(ai|ml|llm|genai)\b/.test(haystack) && entry.tags.includes('ai')) score += 3
     if (/\b(data|analytics|warehouse)\b/.test(haystack) && entry.tags.includes('data')) score += 2

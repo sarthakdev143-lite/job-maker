@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildNaukriUrls } from '@/discovery/sources/scraped-boards'
 import { SearchRecipeSchema, type SearchRecipe } from '@/storage/schemas'
+import { matchCatalogue } from '@/discovery/board-catalogue'
 
 function recipe(overrides: Record<string, unknown> = {}): SearchRecipe {
   return SearchRecipeSchema.parse({ id: 'r1', source: 'naukri', ...overrides })
@@ -59,5 +60,24 @@ describe('buildNaukriUrls', () => {
     expect(buildNaukriUrls(recipe({ keywords: ['data engineer'] }))).toEqual([
       'https://www.naukri.com/data-engineer-jobs',
     ])
+  })
+})
+
+describe('board selection for a remote-only search', () => {
+  it('puts remote-friendly boards ahead of subject-matter matches', () => {
+    const picked = matchCatalogue(['ai', 'machine learning', 'python'], { remoteOnly: true, limit: 12 })
+    const remoteFriendly = picked.filter((b) => b.tags.includes('remote-friendly')).length
+    expect(remoteFriendly).toBeGreaterThan(3)
+  })
+
+  it('still ranks by subject matter when any work mode is acceptable', () => {
+    const anywhere = matchCatalogue(['ai', 'machine learning'], { limit: 12 })
+    const aiBoards = anywhere.filter((b) => b.tags.includes('ai')).length
+    expect(aiBoards).toBeGreaterThan(3)
+  })
+
+  it('keeps India boards in play for a remote-only search', () => {
+    const picked = matchCatalogue(['backend', 'architect'], { india: true, remoteOnly: true, limit: 20 })
+    expect(picked.some((b) => b.tags.includes('india'))).toBe(true)
   })
 })
