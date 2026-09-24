@@ -292,14 +292,39 @@ export async function fetchAshby(recipe: SearchRecipe): Promise<Job[]> {
 }
 
 /** Keyword filter applied after fetching a whole board. */
+/** Words too common in a job title to be worth matching on. */
+const KEYWORD_NOISE = new Set([
+  'and', 'the', 'with', 'for', 'of', 'in', 'an', 'at', 'to', 'on',
+  'senior', 'staff', 'principal', 'lead', 'junior', 'role', 'job',
+])
+
+/**
+ * Split a search phrase into the words worth matching.
+ *
+ * Keywords arrive from the model as whole phrases -- "principal solution
+ * architect distributed systems" -- and no job title ever contains that string.
+ * Matching phrases literally discarded every posting from sixty-eight boards
+ * and reported an empty search, which looks exactly like a market with no jobs
+ * in it.
+ */
+function keywordTerms(phrase: string): string[] {
+  return phrase
+    .toLowerCase()
+    .split(/[^a-z0-9+#.]+/)
+    .filter((w) => w.length >= 2 && !KEYWORD_NOISE.has(w))
+}
+
 export function filterByKeywords(jobs: Job[], recipe: SearchRecipe): Job[] {
   if (recipe.keywords.length === 0 && !recipe.location && !recipe.remoteOnly) return jobs
-  const keywords = recipe.keywords.map((k) => k.toLowerCase()).filter(Boolean)
+  const terms = recipe.keywords.flatMap(keywordTerms)
   const location = recipe.location.toLowerCase().trim()
 
   return jobs.filter((job) => {
     const haystack = `${job.title} ${job.location}`.toLowerCase()
-    if (keywords.length > 0 && !keywords.some((k) => haystack.includes(k))) return false
+    // Deliberately generous: any one distinctive word is enough. Discovery is
+    // the wide end of the funnel, and the prefilter and the scorer downstream
+    // are the parts that are supposed to say no.
+    if (terms.length > 0 && !terms.some((t) => haystack.includes(t))) return false
     if (recipe.remoteOnly && job.workMode !== 'remote') return false
     if (location && job.workMode !== 'remote' && !job.location.toLowerCase().includes(location)) return false
     return true
