@@ -11,6 +11,7 @@
  */
 
 import { detectSeniority, detectWorkMode, normalizeText, parseSalary } from '@/shared/text'
+import { wrongProfession } from './function-fit'
 import type { Job, MatchRules } from '@/storage/schemas'
 
 export type PrefilterVerdict = { pass: true } | { pass: false; reason: string }
@@ -93,6 +94,13 @@ export function prefilter(job: Job, rules: MatchRules, applicantTitles: string[]
 
   if (rules.titleIncludes.length > 0 && !anyMatch(title, rules.titleIncludes)) {
     return { pass: false, reason: 'title matches none of the required keywords' }
+  }
+
+  // Plainly a different profession. Cheap to notice here, and the alternative
+  // is paying the model to score an account executive role for an architect.
+  const otherProfession = wrongProfession(title, applicantTitles)
+  if (otherProfession) {
+    return { pass: false, reason: `looks like a ${otherProfession} role, not your line of work` }
   }
 
   const excludedBody = anyMatch(description, rules.descriptionExcludes)

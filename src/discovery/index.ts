@@ -15,7 +15,7 @@ import { fetchNaukri, hydrateDescriptions } from './sources/scraped-boards'
 import { fetchIndeed, hydrateIndeedJobs } from './sources/indeed'
 import { enrichJob, prefilter } from '@/matching/prefilter'
 import { jobsRepo } from '@/storage/db'
-import { getRecipes, getSettings, saveRecipe } from '@/storage/settings'
+import { getProfile, getRecipes, getSettings, saveRecipe } from '@/storage/settings'
 import { recordRecipeHealth } from '@/background/run-history'
 import { parsePostedDate } from '@/shared/text'
 import { createLogger } from '@/shared/logger'
@@ -24,6 +24,14 @@ import { errorMessage } from '@/shared/util'
 import type { Job, SearchRecipe } from '@/storage/schemas'
 
 const log = createLogger('discovery')
+
+/**
+ * How many postings from one employer a single run will keep.
+ *
+ * Aimed at aggregators rather than at large employers: a company with a dozen
+ * genuine openings still gets its best few through on every sweep.
+ */
+const MAX_PER_COMPANY_PER_RUN = 5
 
 export type DiscoveryResult = {
   fetched: number
@@ -60,6 +68,10 @@ export async function runDiscovery(
   options: { recipeId?: string; shouldStop?: () => boolean } = {}
 ): Promise<DiscoveryResult> {
   const settings = await getSettings()
+  // The applicant's own history, so a posting from another profession can be
+  // dropped without paying the model to notice.
+  const profile = await getProfile()
+  const applicantTitles = [profile.currentTitle, ...profile.experience.map((e: { title: string }) => e.title)].filter(Boolean)
   const recipes = (await getRecipes()).filter(
     (r) => (options.recipeId ? r.id === options.recipeId : r.enabled)
   )
@@ -77,6 +89,9 @@ export async function runDiscovery(
     }
 
     const entry = { fetched: 0, stored: 0 } as DiscoveryResult['byRecipe'][string]
+    // Reset per recipe, so a cap spent on one source does not silence another.
+    const perCompany = new Map<string, number>()
+    const seenRoles = new Set<string>()
     result.byRecipe[recipe.id] = entry
 
     try {
@@ -93,7 +108,7 @@ export async function runDiscovery(
 
       // Only hydrate what could plausibly survive; fetching descriptions is the
       // slow part and there is no point paying it for a blocklisted company.
-      const plausible = jobs.filter((j) => prefilter(j, settings.matchRules).pass || j.descriptionText.length < 400)
+      const plausible = jobs.filter((j) => prefilter(j, settings.matchRules, applicantTitles).pass || j.descriptionText.length < 400)
 
       // Hydration opens a window per job, which is by far the most expensive
       // thing discovery does -- forty of them is roughly five minutes before a
@@ -121,7 +136,7 @@ export async function runDiscovery(
           continue
         }
 
-        const verdict = prefilter(job, settings.matchRules)
+        const verdict = prefilter(job, settings.matchRules, applicantTitles)
         if (!verdict.pass) {
           result.rejected++
           // Rejected jobs are stored so the same posting is never re-fetched or
@@ -129,6 +144,46 @@ export async function runDiscovery(
           await jobsRepo.put({ ...job, status: 'rejected', rejectReason: verdict.reason })
           continue
         }
+
+        // The same role advertised once per city is one role.
+        //
+        // Jitterbit listed "SDET - QA Automation(Remote)" five times, for
+        // Chennai, Mumbai, Pune, Bengaluru and Delhi. Each has its own URL, so
+        // the hash dedupe sees five postings; a person sees one job with five
+        // office addresses attached, and applying to all five is worse than
+        // applying to one. The first is kept, the rest are recorded so the
+        // reason is visible rather than looking like a lost posting.
+        const roleKey = `${job.company.toLowerCase()}|${job.title.trim().toLowerCase()}`
+        if (job.company && job.title && seenRoles.has(roleKey)) {
+          result.rejected++
+          await jobsRepo.put({
+            ...job,
+            status: 'rejected',
+            rejectReason: `same role as another ${job.company} posting this run, in a different city`,
+          })
+          continue
+        }
+
+        // One employer must not take the whole sweep.
+        //
+        // A remote-India search of the Workable index came back with forty
+        // postings, twenty-three of them from a single job-board aggregator
+        // reposting other companies' vacancies. Those twenty-three crowded out
+        // the real employers behind them and cost a model call each. The cap is
+        // per run, not per company forever, so a genuine employer with many
+        // openings still surfaces its best few now and the rest next sweep.
+        const seenHere = perCompany.get(job.company.toLowerCase()) ?? 0
+        if (job.company && seenHere >= MAX_PER_COMPANY_PER_RUN) {
+          result.rejected++
+          await jobsRepo.put({
+            ...job,
+            status: 'rejected',
+            rejectReason: `${MAX_PER_COMPANY_PER_RUN} postings from ${job.company} already taken this run`,
+          })
+          continue
+        }
+        perCompany.set(job.company.toLowerCase(), seenHere + 1)
+        seenRoles.add(roleKey)
 
         await jobsRepo.put(job)
         entry.stored++
