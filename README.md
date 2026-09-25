@@ -61,6 +61,60 @@ Press *Run all enabled*, then open the side panel (toolbar icon → **Open conso
 
 ---
 
+## Where it looks for jobs
+
+Five sources, all public JSON, all read without opening a browser window:
+
+| Source | Shape | Notes |
+| --- | --- | --- |
+| Greenhouse | per-company boards | ~60 candidate slugs in the catalogue |
+| Ashby | per-company boards | ~55 candidates |
+| Lever | per-company boards | ~14 candidates |
+| SmartRecruiters | one public index | takes no location filter, so the place goes into the search words |
+| Workable | one public index | filters on location and work mode, and carries the full advert |
+
+The board catalogue corrects itself twice over. Every slug is checked against
+the real API at setup, so a company that moved ATS is simply dropped. Then the
+boards that answered are ranked by **how many of their open postings you could
+actually take** — the listing has already been downloaded to check the board
+exists, so counting them is free.
+
+That second step matters more than it sounds. Ranking by board size measures
+company headcount and nothing else: a remote-only, India-eligible sweep of the
+forty largest Greenhouse boards fetched 3,350 postings and kept seven, because
+the largest boards are the ones with the most offices in California. Ranked by
+usable postings instead, the same sweep reaches every one of them in twenty
+boards and downloads less.
+
+The two index sources need no slugs at all, which is how the agent reaches
+employers no curated list would ever name — an India-remote architect role at
+Nagarro turned up that way. They are not interchangeable, and the difference was
+measured rather than assumed: Workable honours `location` and `workplace`, while
+SmartRecruiters accepts `country`, `location` and `remote` and silently ignores
+all three. So Workable is filtered at the source and SmartRecruiters has the
+country folded into its keyword, which is the only lever it has — "software
+architect" returns 19 Indian postings in a page of 98, and "India remote
+software architect" returns 89.
+
+What survives the funnel is narrowed by, in order: the search phrase, the
+board's own work-mode flag, whether the role is open where you can work from,
+seniority, whether the title belongs to your profession at all, and your own
+title and company rules. Then two rules about proportion rather than fit: no
+more than five postings from one employer per run, and one role listed once per
+city counts once. Both exist because of things a real sweep did — a job-board
+aggregator supplied 23 of 40 results and crowded out the employers behind it,
+and one company advertised the same remote role five times, once per office.
+
+**Jobs → Filtered out** counts the reasons, which is the fastest way to spot a
+rule that is tighter than you meant it to be, and **Settings → Searches** shows
+what each source is actually contributing against what it costs to sift.
+
+Indeed is supported but switched off once real boards are verified: it is
+scraped through a browser window, rate-limits aggressively, and leads to forms
+that are harder to submit than the ones above.
+
+---
+
 ## How it decides what to fill in
 
 Each field falls through four tiers, cheapest first, and anything that reaches the bottom is parked for you rather than guessed at:
@@ -72,7 +126,18 @@ Each field falls through four tiers, cheapest first, and anything that reaches t
 5. **The model** — genuinely novel questions, batched into one call per page
 6. **Park** — unresolved, or answered with low confidence
 
-Tiers 1–4 are free and instant. **The answer bank grows on its own**: every answer that survived a submitted application is remembered, so the agent gets cheaper and faster the longer you use it. Settings → **Answer bank** is where you correct a recurring wrong answer once, everywhere.
+Tiers 1–4 are free and instant. **The answer bank grows on its own**: every answer that survived a submitted application is remembered, so the agent gets cheaper and faster the longer you use it. Across one user's three most recent applications, 31 of 32 fields were answered without a model call; Settings → **Answers** shows that share, which tier answered each field, and the stored answers being reused the most — a wrong value there is wrong everywhere.
+
+The bank matches questions by a stricter rule than the one used for picking an
+option out of a dropdown, and the two must not be shared. Matching a value
+against an option list should be forgiving, because "India" has to find
+"India +91". Reusing a stored answer on the same basis is how a bank fills
+"Name of your most recent employer" with the applicant's own name. So questions
+are matched with partial credit that decays as the two get further apart in
+length, and polarity and numbers have to agree — "do you require sponsorship"
+and "do you *not* require sponsorship" are not the same question. Anything
+blocked falls through to the model, which still answers it, so being strict
+costs one call rather than an empty box.
 
 ## How it decides whether to submit
 
@@ -84,6 +149,29 @@ One function, [`src/runner/autonomy-gate.ts`](src/runner/autonomy-gate.ts), make
 - in gated mode, the match score and the fill confidence both clear your thresholds
 
 Anything that fails lands in the review queue with its whole fill plan intact, so approving replays that plan exactly — an edit you make there is exactly what the employer receives.
+
+### Which boards will accept an automated submission
+
+Not all of them, and this is worth knowing before you pick a mode. Every major
+ATS loads a bot check on its application page:
+
+| Board | Bot check | Accepts an automated submit? |
+| --- | --- | --- |
+| Ashby | reCAPTCHA | **Yes** — verified by a real submission |
+| Greenhouse | reCAPTCHA Enterprise | **No** — refuses with "There was an error processing your application" |
+| Lever | hCaptcha | Untested |
+| SmartRecruiters | none seen | Untested |
+
+`tests/e2e/scan-bot-checks.mjs` re-runs that scan whenever you want to check
+again; it only reads what the pages load and submits nothing.
+
+This is why **handoff mode** exists. It does the whole application — documents,
+wizard, every field — stops at the last button, brings the filled form to the
+front and notifies you. On a board that refuses automation that is the
+difference between an application sent and twenty minutes of work thrown away,
+and the agent falls back to it by itself whenever a site refuses a submission.
+Six filled forms may wait on screen at once; past that the run pauses rather
+than burying the desktop.
 
 ---
 
