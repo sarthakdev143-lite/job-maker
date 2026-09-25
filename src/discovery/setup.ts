@@ -56,6 +56,9 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
   ]
 
   const india = /india/i.test(profile.country)
+  // What the user will actually accept decides which searches are worth making.
+  const remoteOnly =
+    settings.matchRules.workModes.length > 0 && settings.matchRules.workModes.every((m) => m === 'remote')
   const candidates = dedupe([
     ...fromModel,
     ...matchCatalogue([...keywords, ...profile.skills].map(String), { india, limit: MAX_CANDIDATES }),
@@ -134,6 +137,55 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
     }
     await saveRecipe(recipe)
     created.push(`${boards.length} ${source} board(s): ${boards.slice(0, 6).join(', ')}${boards.length > 6 ? '…' : ''}`)
+  }
+
+  // SmartRecruiters is searched, not listed: it runs one public index across
+  // every employer on it, so there are no board slugs to verify -- the search
+  // phrases are the whole recipe. Worth having precisely because it reaches
+  // employers no curated board list would ever name.
+  {
+    const previous = existing.find((r) => r.source === 'smartrecruiters')
+    const recipe: SearchRecipe = {
+      ...base,
+      id: previous?.id ?? uid('recipe'),
+      name: 'SmartRecruiters index',
+      enabled: true,
+      source: 'smartrecruiters',
+      // This index has no location filter at all, so these are folded into the
+      // search words instead -- the only lever it offers, and a strong one.
+      location: profile.country || '',
+      remoteOnly,
+      boards: [],
+      maxResultsPerRun: 120,
+    }
+    await saveRecipe(recipe)
+    created.push(`SmartRecruiters index across ${keywords.length} search phrase(s)`)
+  }
+
+  // Workable, likewise: one public index rather than a list of boards. Its
+  // records carry the full advert and state their own work mode, so a posting
+  // arrives ready to judge without a second trip to the page.
+  {
+    const previous = existing.find((r) => r.source === 'workable')
+    const recipe: SearchRecipe = {
+      ...base,
+      id: previous?.id ?? uid('recipe'),
+      name: 'Workable index',
+      enabled: true,
+      source: 'workable',
+      // Unlike every other source here, Workable's index filters on these for
+      // real. Verified against the live API: the same phrase without them
+      // returned a page of onsite roles in the US and the UK, and with them
+      // every row was remote and in the right country. Leaving them blank was
+      // the reason the source found a hundred and fifty postings and
+      // contributed none of them.
+      location: profile.country || '',
+      remoteOnly,
+      boards: [],
+      maxResultsPerRun: 120,
+    }
+    await saveRecipe(recipe)
+    created.push(`Workable index across ${keywords.length} search phrase(s)`)
   }
 
   const hasApplyableBoards = created.length > 0

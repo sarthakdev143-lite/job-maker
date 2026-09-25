@@ -50,6 +50,12 @@ export function makeJob(input: {
   recipeId: string
   /** Full posting text arrives in the board JSON; scraped cards carry a snippet. */
   descriptionSource?: 'snippet' | 'hydrated' | 'apply_page'
+  /**
+   * Set when the board states the work mode itself rather than leaving it to be
+   * read out of prose. SmartRecruiters returns `remote` and `hybrid` booleans
+   * per posting, which is worth more than any amount of inference.
+   */
+  workMode?: Job['workMode']
 }): Job {
   const description = condenseDescription(input.descriptionText, 12000)
   const salary = parseSalary(input.salaryText || description.slice(0, 1500))
@@ -63,7 +69,7 @@ export function makeJob(input: {
     company: input.company.trim(),
     title: input.title.trim(),
     location: input.location.trim(),
-    workMode: detectWorkMode(description.slice(0, 1500), input.location, input.title),
+    workMode: input.workMode ?? detectWorkMode(description.slice(0, 1500), input.location, input.title),
     salaryText: input.salaryText ?? '',
     salaryMin: salary.min,
     salaryMax: salary.max,
@@ -312,6 +318,272 @@ function keywordTerms(phrase: string): string[] {
     .toLowerCase()
     .split(/[^a-z0-9+#.]+/)
     .filter((w) => w.length >= 2 && !KEYWORD_NOISE.has(w))
+}
+
+/** Strip the litter a job board leaves in a location string. */
+function cleanLocation(raw: string): string {
+  return raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part && !/^(undefined|null|n\/a|unknown)$/i.test(part))
+    .join(', ')
+}
+
+/* ----------------------------------------------------- smartrecruiters */
+
+type SmartRecruitersPosting = {
+  id: string
+  name: string
+  company?: { identifier?: string; name?: string }
+  releasedDate?: string
+  location?: { city?: string; region?: string; country?: string; remote?: boolean; hybrid?: boolean }
+  applyUrl?: string
+  shortLocation?: string
+}
+
+/**
+ * SmartRecruiters, searched by keyword rather than by board.
+ *
+ * The other three sources are lists of company boards, because that is all
+ * Greenhouse, Lever and Ashby offer. SmartRecruiters runs one public index
+ * across every employer on it -- three hundred and fifty thousand postings --
+ * so the useful unit here is the search phrase, not the company.
+ *
+ * Two of its quirks shape this code. Only `keyword` actually filters: `remote`
+ * and `country` are accepted and ignored, so geography is left to the prefilter
+ * downstream. And each posting states `remote` and `hybrid` outright, which is
+ * better evidence than any amount of reading between the lines of a job advert.
+ */
+export async function fetchSmartRecruiters(recipe: SearchRecipe): Promise<Job[]> {
+  const out: Job[] = []
+  const seen = new Set<string>()
+  const phrases = recipe.keywords.length > 0 ? recipe.keywords : ['software engineer']
+  const perPhrase = Math.max(20, Math.ceil(recipe.maxResultsPerRun / phrases.length))
+
+  for (const phrase of phrases) {
+    // The index runs a relevance search, and the phrases a model writes are
+    // long: "principal solution architect distributed systems" matched sixteen
+    // postings across the whole platform. Its first two or three words are the
+    // part that names the job, so a thin result is retried with those.
+    const words = phrase.split(/\s+/).filter(Boolean)
+    const attempts = words.length > 3 ? [phrase, words.slice(0, 3).join(' '), words.slice(0, 2).join(' ')] : [phrase]
+
+    for (const attempt of attempts) {
+      const before = out.length
+      await searchPhrase(qualify(attempt))
+      // Enough came back on the fuller phrase; no need to widen it.
+      if (out.length - before >= 10) break
+    }
+  }
+
+  /**
+   * Put the place and the work mode into the words, because there is nowhere
+   * else to put them.
+   *
+   * This index takes `keyword` and nothing else: `country`, `location` and
+   * `remote` are all accepted and all silently ignored, which was measured
+   * against the live API rather than assumed. The keyword is matched against
+   * the whole posting, so naming the country in it is the only lever there is,
+   * and it is a surprisingly strong one -- "software architect" returned 19
+   * Indian postings in a page of 98 and 2 remote ones, while "India remote
+   * software engineer" returned 80 and 14 in the same size of page.
+   */
+  function qualify(phrase: string): string {
+    const extra = [recipe.location, recipe.remoteOnly ? 'remote' : '']
+      .map((s) => s.trim())
+      .filter(Boolean)
+      // Don't repeat a word the phrase already uses.
+      .filter((s) => !new RegExp(`\\b${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(phrase))
+    return extra.length === 0 ? phrase : `${extra.join(' ')} ${phrase}`
+  }
+
+  async function searchPhrase(phrase: string): Promise<void> {
+    for (let offset = 0; offset < perPhrase; offset += 100) {
+      let page: { content?: SmartRecruitersPosting[] } | null = null
+      try {
+        page = await fetchJson<{ content?: SmartRecruitersPosting[] }>(
+          `https://jobs.smartrecruiters.com/sr-jobs/search?keyword=${encodeURIComponent(phrase)}&limit=100&offset=${offset}`
+        )
+      } catch (e) {
+        log.warn(`SmartRecruiters search "${phrase}" failed: ${(e as Error).message}`)
+        break
+      }
+
+      const rows = page?.content ?? []
+      if (rows.length === 0) break
+
+      for (const row of rows) {
+        const applyUrl = row.applyUrl ?? ''
+        if (!applyUrl || seen.has(applyUrl)) continue
+        seen.add(applyUrl)
+
+        const where = row.location ?? {}
+        out.push(
+          makeJob({
+            source: 'smartrecruiters',
+            vendor: 'smartrecruiters',
+            url: applyUrl,
+            company: row.company?.name ?? row.company?.identifier ?? '',
+            title: row.name ?? '',
+            // Their own `shortLocation` sometimes reads "Anywhere, undefined".
+            location: cleanLocation(row.shortLocation ?? [where.city, where.region, where.country].join(', ')),
+            // The board says so itself; nothing to infer.
+            workMode: where.remote ? 'remote' : where.hybrid ? 'hybrid' : 'onsite',
+            // Only the card is in the index. The apply machine reads the real
+            // description off the posting when it opens it.
+            descriptionText: '',
+            descriptionSource: 'snippet',
+            postedAt: row.releasedDate ? Date.parse(row.releasedDate) : null,
+            recipeId: recipe.id,
+          })
+        )
+      }
+
+      if (rows.length < 100) break
+    }
+  }
+
+  log.info(`SmartRecruiters: ${out.length} posting(s) across ${phrases.length} search phrase(s)`)
+  return out.slice(0, recipe.maxResultsPerRun)
+}
+
+/* ------------------------------------------------------------- workable */
+
+type WorkableJob = {
+  id: string
+  title: string
+  company?: { title?: string }
+  location?: { city?: string; countryName?: string }
+  workplace?: string
+  url?: string
+  description?: string
+  created?: string
+  state?: string
+}
+
+/**
+ * Workable, through its own public index of every board on the platform.
+ *
+ * Per-company boards were the obvious route and a dead end: the account API
+ * answers for a slug but returns an empty list unless that company still posts
+ * through Workable, so there is no way to build a board list without knowing
+ * the answer first. The aggregate index has no such problem -- it is one search
+ * across everything, the same shape as SmartRecruiters.
+ *
+ * It is also the most generous of the four: each record carries the full
+ * description and a `workplace` field stating remote, hybrid or on-site, so
+ * nothing has to be inferred and the apply machine does not need a second trip
+ * to read the advert.
+ */
+export async function fetchWorkable(recipe: SearchRecipe): Promise<Job[]> {
+  const out: Job[] = []
+  const seen = new Set<string>()
+  const phrases = recipe.keywords.length > 0 ? recipe.keywords : ['software engineer']
+  const perPhrase = Math.max(20, Math.ceil(recipe.maxResultsPerRun / phrases.length))
+
+  for (const phrase of phrases) {
+    let token = ''
+    for (let got = 0; got < perPhrase; ) {
+      // Twenty is the most the index will serve: ask for twenty-five and it
+      // answers 400 rather than clamping, which is why a whole sweep returned
+      // nothing at all the first time this ran against the real API.
+      // `location` and `workplace` are real filters here, unlike on
+      // SmartRecruiters where both are accepted and quietly ignored. Verified
+      // against the live index: without them a page of twenty came back almost
+      // entirely onsite roles in the US and the UK, and with them every row was
+      // a remote posting in the requested country. This is the difference
+      // between a source that contributes nothing and one that contributes
+      // most of the queue, so it is worth stating plainly.
+      const url =
+        `https://jobs.workable.com/api/v1/jobs?query=${encodeURIComponent(phrase)}&limit=20` +
+        (recipe.location ? `&location=${encodeURIComponent(recipe.location)}` : '') +
+        (recipe.remoteOnly ? '&workplace=remote' : '') +
+        (token ? `&pageToken=${encodeURIComponent(token)}` : '')
+
+      let page: { jobs?: WorkableJob[]; nextPageToken?: string } | null = null
+      try {
+        page = await fetchJson<{ jobs?: WorkableJob[]; nextPageToken?: string }>(url)
+      } catch (e) {
+        log.warn(`Workable search "${phrase}" failed: ${(e as Error).message}`)
+        break
+      }
+
+      const rows = page?.jobs ?? []
+      if (rows.length === 0) break
+
+      for (const row of rows) {
+        const link = row.url ?? ''
+        if (!link || seen.has(link) || (row.state && row.state !== 'published')) continue
+        seen.add(link)
+        got++
+
+        const where = row.location ?? {}
+        out.push(
+          makeJob({
+            source: 'workable',
+            vendor: 'workable',
+            url: link,
+            company: row.company?.title ?? '',
+            title: row.title ?? '',
+            location: [where.city, where.countryName].filter(Boolean).join(', '),
+            // Stated by the board, not read out of the advert's prose.
+            workMode: row.workplace === 'remote' ? 'remote' : row.workplace === 'hybrid' ? 'hybrid' : 'onsite',
+            descriptionText: htmlToText(row.description ?? ''),
+            descriptionSource: 'hydrated',
+            postedAt: row.created ? Date.parse(row.created) : null,
+            recipeId: recipe.id,
+          })
+        )
+      }
+
+      token = page?.nextPageToken ?? ''
+      if (!token) break
+    }
+  }
+
+  const where = [recipe.location, recipe.remoteOnly ? 'remote only' : ''].filter(Boolean).join(', ')
+  log.info(
+    `Workable: ${out.length} posting(s) across ${phrases.length} search phrase(s)${where ? ` (${where})` : ''}`
+  )
+  return out.slice(0, recipe.maxResultsPerRun)
+}
+
+/**
+ * Fill in the adverts SmartRecruiters' index leaves out.
+ *
+ * The index carries the card only, so those postings arrive with an empty
+ * description and get scored on their title alone -- which is how a role can be
+ * queued or passed over on six words. Each posting's own endpoint has the full
+ * advert, so the ones that survived the prefilter are worth one request each.
+ *
+ * Only what is about to be judged, never the whole sweep: this runs after the
+ * cheap rules have already thrown away nineteen postings in twenty.
+ */
+export async function hydrateSmartRecruiters(jobs: Job[], limit = 40): Promise<void> {
+  const thin = jobs.filter((j) => j.source === 'smartrecruiters' && !j.descriptionText.trim()).slice(0, limit)
+
+  for (const job of thin) {
+    const id = job.url.match(/\/(\d{6,})(?:-|$)/)?.[1]
+    const company = job.url.match(/smartrecruiters\.com\/([^/]+)\//)?.[1]
+    if (!id || !company) continue
+
+    try {
+      const detail = await fetchJson<{ jobAd?: { sections?: Record<string, { text?: string }> } }>(
+        `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(company)}/postings/${encodeURIComponent(id)}`
+      )
+      const sections = detail?.jobAd?.sections ?? {}
+      const text = ['jobDescription', 'qualifications', 'additionalInformation']
+        .map((key) => sections[key]?.text ?? '')
+        .filter(Boolean)
+        .join('\n\n')
+      if (!text) continue
+
+      job.descriptionText = condenseDescription(htmlToText(text), 12000)
+      job.descriptionSource = 'hydrated'
+    } catch (e) {
+      log.debug(`Could not read the SmartRecruiters advert for ${job.title}: ${(e as Error).message}`)
+    }
+  }
 }
 
 export function filterByKeywords(jobs: Job[], recipe: SearchRecipe): Job[] {

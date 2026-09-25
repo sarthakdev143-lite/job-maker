@@ -10,7 +10,7 @@
  * nothing at all.
  */
 
-import { fetchAshby, fetchGreenhouse, fetchLever, filterByKeywords } from './sources/ats-apis'
+import { fetchAshby, fetchGreenhouse, fetchLever, fetchSmartRecruiters, fetchWorkable, hydrateSmartRecruiters, filterByKeywords } from './sources/ats-apis'
 import { fetchNaukri, hydrateDescriptions } from './sources/scraped-boards'
 import { fetchIndeed, hydrateIndeedJobs } from './sources/indeed'
 import { enrichJob, prefilter } from '@/matching/prefilter'
@@ -51,6 +51,13 @@ async function runRecipe(recipe: SearchRecipe): Promise<Job[]> {
       return filterByKeywords(await fetchLever(recipe), recipe)
     case 'ashby':
       return filterByKeywords(await fetchAshby(recipe), recipe)
+    case 'workable':
+      // Searched by phrase upstream, like SmartRecruiters.
+      return fetchWorkable(recipe)
+    case 'smartrecruiters':
+      // Already searched by phrase upstream; filtering again by the same words
+      // would only throw away what the search was asked for.
+      return fetchSmartRecruiters(recipe)
     case 'indeed':
       return fetchIndeed(recipe)
     case 'naukri':
@@ -126,6 +133,17 @@ export async function runDiscovery(
         await hydrateIndeedJobs(plausible, Math.min(hydrateLimit, recipe.maxResultsPerRun))
       } else if (hydrateLimit > 0 && recipe.source === 'naukri') {
         await hydrateDescriptions(plausible, Math.min(12, recipe.maxResultsPerRun))
+      } else if (hydrateLimit > 0 && recipe.source === 'smartrecruiters') {
+        // One cheap JSON request per surviving posting, and no browser window:
+        // the index carries the card only, so without this the scorer judges a
+        // job on its title and nothing else.
+        //
+        // Only the postings that actually clear the rules, not the much larger
+        // "plausible" set: everything from this source has an empty
+        // description, so `plausible` is nearly the whole sweep and the handful
+        // worth reading are rarely in its first forty.
+        const worthReading = jobs.filter((j) => prefilter(j, settings.matchRules, applicantTitles).pass)
+        await hydrateSmartRecruiters(worthReading, Math.min(hydrateLimit, recipe.maxResultsPerRun))
       }
 
       for (const raw of jobs) {

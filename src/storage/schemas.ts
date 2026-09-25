@@ -191,7 +191,7 @@ export const SearchRecipeSchema = z.object({
   id: z.string(),
   name: z.string().default('Untitled search'),
   enabled: z.boolean().default(true),
-  source: z.enum(['greenhouse', 'lever', 'ashby', 'indeed', 'naukri', 'custom']),
+  source: z.enum(['greenhouse', 'lever', 'ashby', 'smartrecruiters', 'workable', 'indeed', 'naukri', 'custom']),
   keywords: z.array(z.string()).default([]),
   location: z.string().default(''),
   remoteOnly: z.boolean().default(false),

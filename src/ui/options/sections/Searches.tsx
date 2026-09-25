@@ -16,6 +16,10 @@ const SOURCE_HELP: Record<SearchRecipe['source'], string> = {
   greenhouse: 'Reads company boards through Greenhouse’s public JSON. Add company slugs, e.g. "stripe".',
   lever: 'Reads company boards through Lever’s public JSON. Add company slugs, e.g. "ramp".',
   ashby: 'Reads company boards through Ashby’s public JSON. Add board names as they appear in the URL.',
+  smartrecruiters:
+    'Searches every employer on SmartRecruiters at once through its public index. Keyword phrases, not company slugs — each posting states whether it is remote.',
+  workable:
+    'Searches every board on Workable at once through its public index. Keyword phrases, not company slugs — each posting states its work mode and carries the full description.',
   indeed: 'Opens Indeed searches in a background tab. Slower, and Indeed actively discourages automation.',
   naukri: 'Opens Naukri searches in a background tab. Good coverage for India.',
   custom: 'Paste full search URLs. Scraped with the generic listing reader.',
