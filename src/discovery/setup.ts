@@ -17,19 +17,31 @@
  */
 
 import { suggestRules } from '@/matching/suggest'
-import { getProfile, getRecipes, getSettings, saveRecipe } from '@/storage/settings'
+import { getProfile, getRecipes, getSettings, saveRecipe, saveSettings } from '@/storage/settings'
 import { BOARD_CATALOGUE, matchCatalogue, validateBoards, type BoardSource, type CatalogueEntry } from './board-catalogue'
 import { createLogger } from '@/shared/logger'
 import { activity } from '@/shared/activity'
-import { uid } from '@/shared/util'
+import { errorMessage, uid } from '@/shared/util'
 import { DEFAULT_ROLE_PHRASES } from './sources/indeed'
-import type { SearchRecipe } from '@/storage/schemas'
+import type { Profile, SearchRecipe, SuggestedRules } from '@/storage/schemas'
 
 const log = createLogger('setup')
 
-/** Enough boards to produce a steady stream without hammering anyone. */
-const MAX_BOARDS_PER_SOURCE = 25
-const MAX_CANDIDATES = 70
+/**
+ * Enough boards to produce a steady stream without hammering anyone.
+ *
+ * One board is one HTTP request to a public JSON endpoint, and a sweep of fifty
+ * takes under two minutes, so the ceiling is politeness rather than cost. It
+ * was raised once the catalogue grew past a hundred entries: leaving it at
+ * twenty-five meant everything added beyond that was catalogued and never
+ * actually searched.
+ */
+const MAX_BOARDS_PER_SOURCE = 40
+// The catalogue is bigger than this was, and checking a board is one HTTP
+// request that the ranking then uses to sort the useless ones to the bottom.
+// Capping below the catalogue size threw away boards before anything had
+// looked at them.
+const MAX_CANDIDATES = 160
 
 export type SetupResult = {
   created: string[]
@@ -45,7 +57,27 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
   const [settings, profile, existing] = await Promise.all([getSettings(), getProfile(), getRecipes()])
 
   activity.begin('discovering', 'Working out where to look', 90_000)
-  const suggestion = await suggestRules(profile, settings)
+
+  // The model is an improvement here, not a requirement.
+  //
+  // Setting up searches asks it for search phrases and for board slugs it
+  // happens to know. Neither is load-bearing: the catalogue supplies boards,
+  // and a profile that names a current title and some skills already says what
+  // to search for. It used to abort the whole thing, so an expired chat session
+  // -- which is a thing that happens overnight, to nobody's fault -- left the
+  // user unable to build searches at all, with an error about a chat provider
+  // in answer to a question about job boards.
+  const setupNotes: string[] = []
+  let suggestion: SuggestedRules
+  try {
+    suggestion = await suggestRules(profile, settings)
+  } catch (e) {
+    suggestion = suggestionFromProfile(profile)
+    log.warn(`Building searches without the model: ${errorMessage(e)}`)
+    setupNotes.push(
+      'The model was unavailable, so these were built from your profile and the board catalogue alone. Run this again once it is reachable and the searches will be sharper.'
+    )
+  }
   const keywords = suggestion.searchKeywords.length > 0 ? suggestion.searchKeywords : suggestion.titleIncludes
 
   // The model's guesses go in first -- when it does name a board it is usually
@@ -55,21 +87,58 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
     ...suggestion.leverBoards.map((slug) => ({ slug, source: 'lever' as const, tags: [] })),
   ]
 
+  // Everything the model worked out about what this person should and should
+  // not be shown, written down where the filters can see it.
+  //
+  // Two of these were being computed and thrown away. The suggested title
+  // excludes never reached the rules, so a search for a principal architect
+  // came back full of account executives and pre-sales engineers -- every one
+  // of them a real posting, none of them this person's job. And a remote job is
+  // only useful if the user may work from where it is open, which nobody thinks
+  // to configure until a queue full of "Remote - US" shows them why it matters.
+  //
+  // Only ever filled in when the user has left them empty: a rule someone set
+  // by hand outranks anything suggested here.
+  const rules = { ...settings.matchRules }
+  const applied: string[] = []
+
+  if (rules.remoteEligibility.length === 0 && profile.country.trim()) {
+    rules.remoteEligibility = [profile.country.trim()]
+    applied.push(`remote roles open in ${profile.country.trim()}`)
+  }
+  if (rules.titleExcludes.length === 0 && suggestion.titleExcludes.length > 0) {
+    rules.titleExcludes = suggestion.titleExcludes
+    applied.push(`${suggestion.titleExcludes.length} title exclusion(s)`)
+  }
+  // Title *includes* are deliberately not auto-applied. They are a whitelist,
+  // matched as substrings, and the model writes phrases: "principal solution
+  // architect distributed systems" matches no title that has ever existed, and
+  // filling this in unasked would silently reject every posting. The same
+  // mistake in the search keywords cost a whole sweep of sixty-eight boards.
+  if (applied.length > 0) {
+    await saveSettings({ ...settings, matchRules: rules })
+    settings.matchRules = rules
+    log.info(`Matching rules filled in from your profile: ${applied.join(', ')}`)
+  }
+
   const india = /india/i.test(profile.country)
-  // What the user will actually accept decides which searches are worth making.
+  // What the user will actually accept decides which boards are worth checking.
   const remoteOnly =
     settings.matchRules.workModes.length > 0 && settings.matchRules.workModes.every((m) => m === 'remote')
   const candidates = dedupe([
     ...fromModel,
-    ...matchCatalogue([...keywords, ...profile.skills].map(String), { india, limit: MAX_CANDIDATES }),
+    ...matchCatalogue([...keywords, ...profile.skills].map(String), { india, remoteOnly, limit: MAX_CANDIDATES }),
   ]).slice(0, MAX_CANDIDATES)
 
   activity.relabel(`Checking ${candidates.length} company boards`)
-  const checks = await validateBoards(candidates)
+  // Judged on how many postings the user could take, not on board size: a
+  // board with four hundred Bay Area jobs is worth less here than one with
+  // three that are remote and open to India.
+  const checks = await validateBoards(candidates, { country: profile.country, remoteOnly })
   const live = checks.filter((c) => c.live)
 
   const created: string[] = []
-  const notes: string[] = []
+  const notes: string[] = [...setupNotes]
 
   // --- Indeed, as the fallback ----------------------------------------------
   //
@@ -107,7 +176,7 @@ export async function setUpSearchesFromProfile(): Promise<SetupResult> {
   const bySource = (source: BoardSource): string[] =>
     live
       .filter((c) => c.source === source)
-      .sort((a, b) => b.jobCount - a.jobCount)
+      .sort((a, b) => b.matchCount - a.matchCount || b.jobCount - a.jobCount)
       .slice(0, MAX_BOARDS_PER_SOURCE)
       .map((c) => c.slug)
 
@@ -307,4 +376,53 @@ export async function enableExistingSearches(): Promise<number> {
     enabled++
   }
   return enabled
+}
+
+/**
+ * What to search for, worked out from the profile alone.
+ *
+ * Plainly worse than asking the model, and much better than refusing. The
+ * phrases are the person's own job titles, which is what a person typing into a
+ * job board would use, and a couple of skill-qualified variants so the two
+ * index sources have more than one thing to match on. No board slugs: guessing
+ * company names without a model is how you get a list of 404s, and the
+ * catalogue already covers that.
+ */
+function suggestionFromProfile(profile: Profile): SuggestedRules {
+  const titles = [profile.currentTitle, ...profile.experience.map((e) => e.title)]
+    .map((t) => String(t ?? '').trim())
+    .filter(Boolean)
+  const skills = profile.skills.map((s) => String(s).trim()).filter(Boolean)
+
+  const phrases = new Set<string>()
+  for (const title of titles.slice(0, 3)) {
+    const lower = title.toLowerCase()
+    phrases.add(lower)
+    // The same role without its rank. "Principal Solution Architect" is a real
+    // title and a narrow search; "solution architect" is the job, and matches
+    // the postings that spell the rank differently or not at all. Leaving this
+    // out cost an order of magnitude: a sweep on the ranked titles alone
+    // matched 126 postings across the company boards where a broader set had
+    // matched 1,794.
+    const bare = lower.replace(
+      /^(principal|senior|staff|lead|chief|head of|associate|junior|sr\.?|jr\.?)\s+/,
+      ''
+    )
+    if (bare !== lower) phrases.add(bare)
+    // One skill-qualified variant per title: "software architect kubernetes"
+    // finds different postings from "software architect" on a keyword index.
+    if (skills[0]) phrases.add(`${lower} ${skills[0].toLowerCase()}`)
+  }
+  if (phrases.size === 0) for (const phrase of DEFAULT_ROLE_PHRASES) phrases.add(phrase)
+
+  return {
+    titleIncludes: [],
+    titleExcludes: [],
+    descriptionIncludes: [],
+    seniority: [],
+    searchKeywords: [...phrases].slice(0, 8),
+    greenhouseBoards: [],
+    leverBoards: [],
+    rationale: 'Built from your profile, without the model.',
+  }
 }
