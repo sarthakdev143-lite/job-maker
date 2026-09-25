@@ -15,11 +15,15 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { Section } from '../../shared/components'
+import { api } from '../../shared/api'
 
 const ALL_SITES = { origins: ['https://*/*'] } as const
 
 export default function SiteAccessSection() {
   const [granted, setGranted] = useState<boolean | null>(null)
+  // What the grant is actually worth right now, in jobs. An abstract toggle is
+  // easy to leave off; "12 queued jobs are waiting behind this" is not.
+  const [blocked, setBlocked] = useState<{ blocked: number; origins: Array<{ origin: string; count: number; example: string }> } | null>(null)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState('')
 
@@ -30,6 +34,13 @@ export default function SiteAccessSection() {
       setGranted(null)
     }
   }, [])
+
+  useEffect(() => {
+    void api
+      .accessNeeded()
+      .then(setBlocked)
+      .catch(() => setBlocked(null))
+  }, [granted])
 
   useEffect(() => {
     void refresh()
@@ -62,6 +73,26 @@ export default function SiteAccessSection() {
       title="Site access"
       description="Which sites the agent is allowed to read and fill. Without this it can only apply on the boards baked into the extension."
     >
+      {!granted && blocked && blocked.blocked > 0 && (
+        <div className="mb-3 rounded-md px-3 py-2.5" style={{ background: 'var(--warn-soft)' }}>
+          <p className="text-[12.5px] font-medium" style={{ color: 'var(--warn)' }}>
+            {blocked.blocked} queued job{blocked.blocked === 1 ? '' : 's'} cannot be applied to without this
+          </p>
+          <ul className="mt-1 text-[11.5px]" style={{ color: 'var(--ink-soft)' }}>
+            {blocked.origins.slice(0, 5).map((o) => (
+              <li key={o.origin}>
+                {o.origin.replace('https://', '').replace('/*', '')} — {o.count} job{o.count === 1 ? '' : 's'},
+                e.g. {o.example}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-[11px]" style={{ color: 'var(--ink-faint)' }}>
+            These are ordinary application forms; the company just hosts them on its own domain rather than on the
+            ATS. Chrome will not let the agent read a page it was never granted.
+          </p>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-3">
         <span
           className="rounded-full px-2 py-0.5 text-[11.5px] font-medium"

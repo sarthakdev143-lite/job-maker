@@ -13,6 +13,7 @@
 
 import { orchestrator } from './orchestrator'
 import { runDiscovery } from '@/discovery'
+import { accessNeeded, bankCoverage, recurringParks, rejectionSummary, scoreQueue, sourceYield } from './insights'
 import { setUpSearchesFromProfile } from '@/discovery/setup'
 import { startAutopilot } from './autopilot'
 import { applyToJob, dryRunUrl, submitApprovedApplication } from '@/runner/apply-machine'
@@ -38,7 +39,7 @@ import { createLogger, setLogBroadcaster } from '@/shared/logger'
 import { getLastSummary, getRecentSummaries, getRecipeHealth } from './run-history'
 import { err, ok, type BroadcastEvent, type UiRequest } from '@/shared/messages'
 import { errorMessage } from '@/shared/util'
-import { formAgentFiles } from '@/shared/injection'
+import { formAgentFiles, hasHostAccess, originPattern } from '@/shared/injection'
 import { allEvidence, clearEvidence } from '@/storage/evidence'
 import { allSiteMemory, clearSiteMemory } from '@/storage/site-memory'
 import { runSelfTest } from './self-test'
@@ -362,6 +363,24 @@ async function route(msg: UiRequest): Promise<unknown> {
       return { dataUrl: await blobToDataUrl(stored.blob), fileName: stored.meta.fileName }
     }
 
+    case 'ui:scoreQueue':
+      return scoreQueue(msg.limit)
+
+    case 'ui:rejectionSummary':
+      return rejectionSummary()
+
+    case 'ui:accessNeeded':
+      return accessNeeded()
+
+    case 'ui:bankCoverage':
+      return bankCoverage()
+
+    case 'ui:sourceYield':
+      return sourceYield()
+
+    case 'ui:recurringParks':
+      return recurringParks()
+
     case 'ui:dryRunUrl':
       return dryRunUrl(msg.url)
 
@@ -386,6 +405,7 @@ async function route(msg: UiRequest): Promise<unknown> {
  * something is visibly moving, so the bridge reports how much text has arrived
  * and that becomes the liveness signal the panel watches.
  */
+
 chrome.runtime.onMessage.addListener((msg: DeepSeekProgress) => {
   if (!msg || msg.type !== 'ds:progress') return false
   activity.note(

@@ -27,6 +27,9 @@ const SOURCE_HELP: Record<SearchRecipe['source'], string> = {
 
 export default function SearchesSection() {
   const { data: recipes, loading, reload } = useAsync(() => api.getRecipes(), [])
+  // Ranking is cheap and reversible; applying is neither. Seeing the scores
+  // before anything is sent is the whole point of keeping them separate.
+  const [scored, setScored] = useState('')
   const { run, busy, error } = useAction()
   const [setupSummary, setSetupSummary] = useState<string[] | null>(null)
 
@@ -90,6 +93,18 @@ export default function SearchesSection() {
           </p>
         )}
 
+        {scored && (
+          <div className="rounded-md px-3 py-2.5" style={{ background: 'var(--surface-2, rgba(127,127,127,0.08))' }}>
+            <p className="text-[12.5px] font-medium">What the searches found, ranked</p>
+            <pre className="mt-1 whitespace-pre-wrap text-[11.5px]" style={{ color: 'var(--ink-soft)' }}>
+              {scored}
+            </pre>
+            <p className="mt-1.5 text-[11.5px]" style={{ color: 'var(--ink-faint)' }}>
+              Nothing was applied to. Anything that cleared your match threshold is now queued.
+            </p>
+          </div>
+        )}
+
         {setupSummary && (
           <div className="rounded-md px-3 py-2.5" style={{ background: 'var(--good-soft)' }}>
             <p className="text-[12.5px] font-medium" style={{ color: 'var(--good)' }}>
@@ -115,6 +130,30 @@ export default function SearchesSection() {
           <>
             <button className="btn btn-sm" disabled={!!busy} onClick={add}>
               Add search
+            </button>
+            <button
+              className="btn btn-sm"
+              disabled={!!busy}
+              title="Rank what the searches found, without applying to anything"
+              onClick={() =>
+                run(async () => {
+                  const result = await api.scoreQueue(40)
+                  // A model that cannot answer at all fails identically on
+                  // every posting, and the old summary reported that as forty
+                  // separate failures with no cause. Lead with the cause.
+                  setScored(
+                    (result.blockedBy
+                      ? `Stopped after ${result.failed}: ${result.blockedBy}. Nothing was lost — the rest are still waiting.\n\n`
+                      : `Scored ${result.scored}, queued ${result.queued}.\n\n`) +
+                      result.top
+                        .map((t) => `${t.score}  ${t.title} - ${t.company}\n     ${t.reason}`)
+                        .join('\n')
+                  )
+                  reload()
+                }, 'scoring')
+              }
+            >
+              {busy === 'scoring' ? 'Scoring…' : 'Score what was found'}
             </button>
             <button
               className="btn btn-primary btn-sm"
@@ -147,6 +186,67 @@ export default function SearchesSection() {
           ))}
         </div>
       </Section>
+
+      <Section
+        title="What each source is worth"
+        description="Sources are wildly unequal. A board list can return two thousand postings and contribute none, while an index returns forty and fills half the queue."
+      >
+        <SourceYield />
+      </Section>
+    </div>
+  )
+}
+
+/**
+ * A hit rate, without rounding the interesting cases to zero.
+ *
+ * A board list that returns 1,765 postings and contributes five is not the same
+ * as one that contributes none, and "0%" says they are.
+ */
+function formatRate(rate: number): string {
+  if (rate === 0) return '0%'
+  if (rate < 0.01) return `${(rate * 100).toFixed(2)}%`
+  if (rate < 0.1) return `${(rate * 100).toFixed(1)}%`
+  return `${Math.round(rate * 100)}%`
+}
+
+/**
+ * Per-source contribution.
+ *
+ * The number a sweep reports is how many postings it found, which rewards the
+ * source that wastes the most time. What matters is how many survived, and the
+ * hit rate is counted against what has actually been judged so a source whose
+ * postings are still queued for scoring is not marked down for it.
+ */
+function SourceYield() {
+  const { data, loading } = useAsync(() => api.sourceYield(), [])
+
+  if (loading && !data) return <Spinner label="Counting" />
+  if (!data || data.sources.length === 0) {
+    return <Empty title="Nothing found yet" hint="Run a search and this fills in." />
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2 px-1 text-[11px] uppercase tracking-wide opacity-60">
+        <span className="w-[130px] shrink-0">Source</span>
+        <span className="w-[70px] shrink-0 text-right">Found</span>
+        <span className="w-[70px] shrink-0 text-right">Kept</span>
+        <span className="w-[80px] shrink-0 text-right">Unscored</span>
+        <span className="w-[70px] shrink-0 text-right">Hit rate</span>
+      </div>
+      {data.sources.map((row) => (
+        <div key={row.source} className="surface flex items-center gap-2 px-3 py-1.5 text-[12.5px]">
+          <span className="w-[130px] shrink-0 truncate font-medium">{row.source}</span>
+          <span className="w-[70px] shrink-0 text-right tabular-nums">{row.found}</span>
+          <span className="w-[70px] shrink-0 text-right tabular-nums">{row.queued + row.applied}</span>
+          <span className="w-[80px] shrink-0 text-right tabular-nums opacity-60">{row.unscored}</span>
+          <span className="w-[70px] shrink-0 text-right tabular-nums">
+            {row.found === row.unscored ? '—' : formatRate(row.hitRate)}
+          </span>
+        </div>
+      ))}
+      <p className="hint">{data.total} posting(s) stored in total.</p>
     </div>
   )
 }

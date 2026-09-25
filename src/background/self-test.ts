@@ -26,11 +26,13 @@ import { BUILD_ID } from '@/shared/build'
 import { createLogger } from '@/shared/logger'
 import { activity } from '@/shared/activity'
 import { llm } from '@/llm/broker'
+import { LlmError } from '@/llm/driver'
 import { formAgentFiles } from '@/shared/injection'
 import { getProfile, getRecipes, profileIsUsable } from '@/storage/settings'
 import { jobsRepo } from '@/storage/db'
 import { probeJobPage, type PageProbe } from '@/runner/apply-machine'
 import { allSiteMemory } from '@/storage/site-memory'
+import { getRecipeHealth } from './run-history'
 import { isHalted } from './run-state'
 import { z } from 'zod'
 
@@ -236,6 +238,67 @@ const ContractSchema = z.object({
   count: z.number().default(0),
 })
 
+/**
+ * Did the last search actually produce anything to apply to?
+ *
+ * The failure this exists for is silent by construction: every board answers,
+ * the log fills with "Greenhouse board X: 40 posting(s)", and the queue stays
+ * empty because something downstream is discarding all of it. That happened for
+ * a whole night's run -- keywords arriving from the model as phrases were being
+ * matched against titles as literal substrings, so 2,600 fetched postings
+ * became zero candidates and the agent looked like it had found a dead market.
+ *
+ * Fetching plenty and keeping none is the signature, so that is what this
+ * looks for.
+ */
+async function checkSearchYield(): Promise<SelfTestCheck> {
+  const health = await getRecipeHealth()
+  const runs = Object.values(health).filter((h) => h.lastRunAt)
+
+  if (runs.length === 0) {
+    return {
+      id: 'search-yield',
+      name: 'The searches find jobs worth looking at',
+      status: 'skip',
+      detail: 'No search has run yet',
+    }
+  }
+
+  const fetched = runs.reduce((n, h) => n + h.lastFetched, 0)
+  const stored = runs.reduce((n, h) => n + h.lastStored, 0)
+  const failing = runs.filter((h) => h.lastError).length
+
+  if (fetched === 0) {
+    return {
+      id: 'search-yield',
+      name: 'The searches find jobs worth looking at',
+      status: failing > 0 ? 'fail' : 'warn',
+      detail:
+        failing > 0
+          ? `${failing} search(es) errored and nothing was fetched`
+          : 'The last run fetched nothing at all. Check the boards in Settings -> Searches.',
+    }
+  }
+
+  if (stored === 0) {
+    return {
+      id: 'search-yield',
+      name: 'The searches find jobs worth looking at',
+      status: 'fail',
+      detail:
+        `Fetched ${fetched} posting(s) and kept none. That is a filter discarding everything ` +
+        'rather than an empty market: check Jobs -> Filtered out, which counts the reasons.',
+    }
+  }
+
+  return {
+    id: 'search-yield',
+    name: 'The searches find jobs worth looking at',
+    status: 'pass',
+    detail: `Last run: ${fetched} fetched, ${stored} kept`,
+  }
+}
+
 async function checkModelContract(): Promise<SelfTestCheck> {
   const startedAt = Date.now()
   try {
@@ -281,9 +344,30 @@ async function checkModelContract(): Promise<SelfTestCheck> {
       name: 'The model returns usable JSON',
       status: 'fail',
       detail: (e as Error).message,
-      fix: 'Settings -> Model. Check the key, the model id, and that the model is instruction-tuned.',
+      // The advice has to match the cause. An expired browser session and a
+      // wrong model id both surface here, and sending someone to check their
+      // model id when what actually happened is that their chat session lapsed
+      // overnight costs them the time it takes to rule that out.
+      fix: fixForModelFailure(e),
       elapsedMs: Date.now() - startedAt,
     }
+  }
+}
+
+/** Where to send someone, given why the model would not answer. */
+function fixForModelFailure(e: unknown): string {
+  const code = e instanceof LlmError ? e.code : ''
+  switch (code) {
+    case 'not_logged_in':
+      return 'Open the provider in a tab and sign in again. Browser sessions lapse on their own, and nothing else here is wrong.'
+    case 'not_ready':
+      return 'The provider tab is open but not answering yet. Give it a moment and run this again.'
+    case 'timeout':
+      return 'The model did not answer in time. A smaller or faster model in Settings -> Model will make every application quicker.'
+    case 'config':
+      return 'Settings -> Model. No model is configured yet.'
+    default:
+      return 'Settings -> Model. Check the key, the model id, and that the model is instruction-tuned.'
   }
 }
 
@@ -370,6 +454,8 @@ export async function runSelfTest(options: SelfTestOptions = {}): Promise<SelfTe
       })
     }
   }
+
+  checks.push(await checkSearchYield())
 
   activity.relabel('Self-test: asking the model for JSON')
   checks.push(await checkModelContract())

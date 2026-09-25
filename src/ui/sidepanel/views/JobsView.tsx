@@ -18,6 +18,13 @@ export default function JobsView() {
   const [bucket, setBucket] = useState<Bucket>('queued')
   const { tick } = useWorkerEvents(['evt:jobs'])
   const { data: jobs, loading, reload } = useAsync(() => api.listJobs(bucket, 150), [bucket, tick])
+  // A list of two thousand rejections says nothing about which rule caused
+  // them. The counts do, and they are the fastest way to see a rule that is
+  // tighter than it was meant to be.
+  const { data: summary } = useAsync(
+    () => (bucket === 'rejected' ? api.rejectionSummary() : Promise.resolve(null)),
+    [bucket, tick]
+  )
   const { run, busy } = useAction()
 
   return (
@@ -36,6 +43,27 @@ export default function JobsView() {
       />
 
       <div className="mt-3">
+        {bucket === 'rejected' && summary && summary.total > 0 && (
+          <div className="mb-3 surface px-3 py-2.5">
+            <p className="text-[12.5px] font-medium">
+              {summary.total.toLocaleString()} filtered out, by reason
+            </p>
+            <ul className="mt-1.5 flex flex-col gap-1">
+              {summary.reasons.map((r) => (
+                <li key={r.reason} className="flex items-baseline justify-between gap-3 text-[11.5px]">
+                  <span style={{ color: 'var(--ink-soft)' }}>{r.reason}</span>
+                  <span className="tabular-nums" style={{ color: 'var(--ink-faint)' }}>
+                    {r.count.toLocaleString()}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-[11px]" style={{ color: 'var(--ink-faint)' }}>
+              A reason that accounts for nearly everything is usually a rule that is tighter than you meant.
+            </p>
+          </div>
+        )}
+
         {loading && !jobs && <Spinner label="Loading jobs" />}
 
         {jobs && jobs.length === 0 && (

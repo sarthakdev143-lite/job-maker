@@ -16,8 +16,9 @@ import type { AutopilotResult } from '@/background/autopilot'
 import type { Evidence } from '@/storage/evidence'
 import type { SiteMemory } from '@/storage/site-memory'
 import type { SelfTestReport } from '@/background/self-test'
+import type { BankCoverage, RecurringPark, ScoreQueueResult, SourceYield } from '@/background/insights'
 
-export type { SelfTestReport }
+export type { SelfTestReport, BankCoverage, RecurringPark, ScoreQueueResult, SourceYield }
 
 export type SiteMemoryRow = { host: string } & SiteMemory
 export type { Evidence }
@@ -48,6 +49,18 @@ export const api = {
   saveRecipe: (recipe: SearchRecipe) => sendToWorker<SearchRecipe[]>({ type: 'ui:saveRecipe', recipe }),
   deleteRecipe: (id: string) => sendToWorker<SearchRecipe[]>({ type: 'ui:deleteRecipe', id }),
   runDiscovery: (recipeId?: string) => sendToWorker<unknown>({ type: 'ui:runDiscovery', recipeId }),
+  accessNeeded: () =>
+    sendToWorker<{ blocked: number; origins: Array<{ origin: string; count: number; example: string }> }>({
+      type: 'ui:accessNeeded',
+    }),
+  bankCoverage: () => sendToWorker<BankCoverage>({ type: 'ui:bankCoverage' }),
+  sourceYield: () => sendToWorker<SourceYield>({ type: 'ui:sourceYield' }),
+  recurringParks: () => sendToWorker<RecurringPark[]>({ type: 'ui:recurringParks' }),
+  rejectionSummary: () =>
+    sendToWorker<{ total: number; reasons: Array<{ reason: string; count: number }> }>({
+      type: 'ui:rejectionSummary',
+    }),
+  scoreQueue: (limit?: number) => sendToWorker<ScoreQueueResult>({ type: 'ui:scoreQueue', limit }),
   listJobs: (status?: string, limit?: number) => sendToWorker<Job[]>({ type: 'ui:listJobs', status, limit }),
   listApplications: (status?: string, limit?: number) =>
     sendToWorker<Application[]>({ type: 'ui:listApplications', status, limit }),

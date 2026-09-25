@@ -11,6 +11,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { formatSelfTest, runSelfTest, type SelfTestReport } from '@/background/self-test'
+import { LlmError } from '@/llm/driver'
 
 const state = {
   allSitesGranted: true,
@@ -25,11 +26,15 @@ const state = {
   profileOk: true,
   queued: [] as Array<{ url: string; applyUrl: string }>,
   recipes: [{ enabled: true }],
+  modelError: null as Error | null,
+  recipeHealth: {} as Record<string, { lastRunAt: number | null; lastFetched: number; lastStored: number; lastError: string }>,
 }
 
 vi.mock('@/llm/broker', () => ({
   llm: {
     completeStructured: vi.fn(async () => {
+      // An Error instance, when the test cares which *kind* of failure it was.
+      if (state.modelError) throw state.modelError
       if (state.modelThrows) throw new Error(state.modelThrows)
       return state.modelAnswer
     }),
@@ -47,6 +52,7 @@ vi.mock('@/storage/db', () => ({
 }))
 
 vi.mock('@/storage/site-memory', () => ({ allSiteMemory: vi.fn(async () => []) }))
+vi.mock('@/background/run-history', () => ({ getRecipeHealth: vi.fn(async () => state.recipeHealth) }))
 vi.mock('@/background/run-state', () => ({ isHalted: vi.fn(async () => state.halted) }))
 vi.mock('@/shared/injection', () => ({
   formAgentFiles: vi.fn(() => state.contentScripts[1]?.js ?? []),
@@ -199,5 +205,72 @@ describe('formatSelfTest', () => {
     expect(text).toMatch(/\[WARN\] Chrome lets it read job sites/)
     // A report without the remedy is just a complaint.
     expect(text).toContain('FIX: Settings -> Advanced -> Site access')
+  })
+})
+
+describe('a search that fetches plenty and keeps none', () => {
+  it('is reported as a failure, not as an empty market', async () => {
+    state.recipeHealth = {
+      r1: { lastRunAt: Date.now(), lastFetched: 2600, lastStored: 0, lastError: '' },
+    }
+    const report = await runSelfTest({ probePages: false })
+    const check = report.checks.find((c) => c.id === 'search-yield')
+    expect(check?.status).toBe('fail')
+    expect(check?.detail).toMatch(/kept none|filter/i)
+  })
+
+  it('passes when the last run kept something', async () => {
+    state.recipeHealth = {
+      r1: { lastRunAt: Date.now(), lastFetched: 1582, lastStored: 23, lastError: '' },
+    }
+    const report = await runSelfTest({ probePages: false })
+    expect(report.checks.find((c) => c.id === 'search-yield')?.status).toBe('pass')
+  })
+
+  it('says nothing when no search has run yet', async () => {
+    state.recipeHealth = {}
+    const report = await runSelfTest({ probePages: false })
+    expect(report.checks.find((c) => c.id === 'search-yield')?.status).toBe('skip')
+  })
+})
+
+/**
+ * The advice has to match the cause.
+ *
+ * A DeepSeek session lapsed overnight and the self-test said to check the API
+ * key and the model id -- neither of which was wrong, and both of which take
+ * time to rule out. The failure already carries a code; it just was not read.
+ */
+async function runWithModelFailure(error: Error): Promise<SelfTestReport> {
+  state.modelError = error
+  try {
+    return await runSelfTest()
+  } finally {
+    state.modelError = null
+  }
+}
+
+describe('what the model check tells you to do', () => {
+  it('sends you to sign in when the session lapsed', async () => {
+    const report = await runWithModelFailure(new LlmError('Not signed in to DeepSeek', 'not_logged_in'))
+    const check = report.checks.find((c) => c.id === 'modelContract')
+    expect(check?.status).toBe('fail')
+    expect(check?.fix).toMatch(/sign in/i)
+    expect(check?.fix).not.toMatch(/model id/i)
+  })
+
+  it('sends you to the model settings when nothing is configured', async () => {
+    const report = await runWithModelFailure(new LlmError('No model configured', 'config'))
+    expect(report.checks.find((c) => c.id === 'modelContract')?.fix).toMatch(/Settings -> Model/)
+  })
+
+  it('suggests a faster model when the answer never arrived', async () => {
+    const report = await runWithModelFailure(new LlmError('timed out', 'timeout'))
+    expect(report.checks.find((c) => c.id === 'modelContract')?.fix).toMatch(/faster model/i)
+  })
+
+  it('keeps the old advice for a failure it cannot place', async () => {
+    const report = await runWithModelFailure(new Error('something else entirely'))
+    expect(report.checks.find((c) => c.id === 'modelContract')?.fix).toMatch(/instruction-tuned/)
   })
 })

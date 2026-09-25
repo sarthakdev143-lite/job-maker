@@ -35,6 +35,18 @@ export type UiRequest =
   | { type: 'ui:saveRecipe'; recipe: SearchRecipe }
   | { type: 'ui:deleteRecipe'; id: string }
   | { type: 'ui:runDiscovery'; recipeId?: string }
+  /** Score what discovery found, without applying to any of it. */
+  | { type: 'ui:scoreQueue'; limit?: number }
+  /** Why the filtered-out pile is the size it is. */
+  | { type: 'ui:rejectionSummary' }
+  /** Queued jobs sitting on sites the extension has no access to. */
+  | { type: 'ui:accessNeeded' }
+  /** How much of the form filling is already answered without a model call. */
+  | { type: 'ui:bankCoverage' }
+  /** What each search source contributed, against what it cost to sift. */
+  | { type: 'ui:sourceYield' }
+  /** Questions that keep stopping applications, worth answering once. */
+  | { type: 'ui:recurringParks' }
   | { type: 'ui:listJobs'; status?: string; limit?: number }
   | { type: 'ui:listApplications'; status?: string; limit?: number }
   | { type: 'ui:getApplication'; id: string }
