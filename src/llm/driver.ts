@@ -2,7 +2,7 @@
  * The driver contract.
  *
  * Everything above this line (scoring, field answering, tailoring) only ever
- * sees `complete()`. Swapping DeepSeek's web UI for an API key is a settings
+ * sees `complete()`. Swapping a driven chat site for an API key is a settings
  * change, not a refactor, which matters because the web driver is the most
  * fragile part of the system and will eventually need replacing.
  */

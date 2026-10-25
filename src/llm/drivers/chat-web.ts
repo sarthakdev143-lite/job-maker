@@ -1,10 +1,15 @@
 /**
- * DeepSeek web driver.
+ * Chat-site web driver.
  *
- * Owns one tab on chat.deepseek.com and talks to the bridge content script
- * inside it. The tab lives in its own minimized window so it never steals the
- * user's focus or clutters their working window, and it is reused for the life
- * of the session.
+ * Owns one tab on a chat site and talks to the bridge content script inside it.
+ * The tab lives in its own minimized window so it never steals the user's focus
+ * or clutters their working window, and it is reused for the life of the
+ * session.
+ *
+ * Which site is a parameter, not a constant: DeepAI is the default and the
+ * fallback, DeepSeek is kept as an alternative because a free web driver you
+ * cannot switch away from is a single point of failure. Everything below is
+ * site-agnostic -- the selectors live in `chat-sites.ts`.
  *
  * Everything here is serialized by the broker: this driver assumes one prompt
  * in flight at a time and the bridge enforces that assumption.
@@ -12,47 +17,59 @@
 
 import type { CompleteRequest, LlmDriver, LlmHealth } from '../driver'
 import { LlmError } from '../driver'
-import type { DeepSeekResponse } from '@/shared/messages'
+import type { ChatResponse } from '@/shared/messages'
 import type { LlmConfig } from '@/storage/schemas'
 import { createLogger } from '@/shared/logger'
 import { sleep, uid, withTimeout } from '@/shared/util'
-import { deepseekBridgeFiles, ensureContentScript, waitForTabComplete } from '@/shared/injection'
+import { chatBridgeFiles, ensureContentScript, waitForTabComplete } from '@/shared/injection'
 import { openWorkerWindow } from '@/shared/windows'
 import { activity } from '@/shared/activity'
+import { DEEPAI, type ChatSite } from '../chat-sites'
 
-const log = createLogger('llm:deepseek')
+const log = createLogger('llm:chat')
 
-const CHAT_URL = 'https://chat.deepseek.com/'
-const URL_MATCH = 'https://chat.deepseek.com/*'
 const BRIDGE_READY_TIMEOUT_MS = 30000
 /** Shorter than a real request: the panel calls this on every open. */
 const HEALTH_TIMEOUT_MS = 20000
 
-export class DeepSeekWebDriver implements LlmDriver {
-  readonly id = 'deepseek-web'
-  readonly label = 'DeepSeek (web)'
+export class ChatWebDriver implements LlmDriver {
+  readonly id: string
+  readonly label: string
 
+  private site: ChatSite
   private tabId: number | null = null
   private windowId: number | null = null
   private requestsSinceNewChat = 0
   private lastSentAt = 0
 
-  constructor(private config: LlmConfig) {}
+  constructor(
+    private config: LlmConfig,
+    site: ChatSite = DEEPAI
+  ) {
+    this.site = site
+    this.id = site.id
+    this.label = site.label
+  }
+
+  /** The site this instance is talking to, for the broker and the UI. */
+  get chatSite(): ChatSite {
+    return this.site
+  }
 
   /**
    * Hold off until `minRequestGapMs` has passed since the last prompt.
    *
    * A run can produce prompts back to back for hours. The chat product is not
-   * built for that, and hammering it is both rude and the fastest way to get
-   * an account limited. If this pacing is too slow for the volume you want,
-   * the answer is the paid API driver, which is sold for exactly this.
+   * built for that, and hammering it is both rude and the fastest way to get an
+   * account limited. If this pacing is too slow for the volume you want, the
+   * answer is the paid API driver, which is sold for exactly this.
    */
   private async pace(): Promise<void> {
     const gap = Math.max(0, this.config.minRequestGapMs ?? 0)
     if (gap === 0 || this.lastSentAt === 0) return
     const waitMs = gap - (Date.now() - this.lastSentAt)
     if (waitMs > 0) {
-      log.debug('Pacing the next DeepSeek prompt', { waitMs })
+      log.debug('Pacing the next chat prompt', { site: this.site.id, waitMs })
       await sleep(waitMs)
     }
   }
@@ -64,9 +81,9 @@ export class DeepSeekWebDriver implements LlmDriver {
   /* ------------------------------------------------------------ tab plumbing */
 
   private async findExistingTab(): Promise<chrome.tabs.Tab | null> {
-    const tabs = await chrome.tabs.query({ url: URL_MATCH })
-    // Prefer a tab we already adopted; otherwise take any DeepSeek tab the user
-    // happens to have open, which saves opening a second one.
+    const tabs = await chrome.tabs.query({ url: this.site.match })
+    // Prefer a tab we already adopted; otherwise take any tab the user happens
+    // to have open on that site, which saves opening a second one.
     const mine = tabs.find((t) => t.id === this.tabId)
     return mine ?? tabs[0] ?? null
   }
@@ -85,18 +102,18 @@ export class DeepSeekWebDriver implements LlmDriver {
 
     let created
     try {
-      created = await openWorkerWindow(CHAT_URL, {
+      created = await openWorkerWindow(this.site.chatUrl, {
         minimized: this.config.keepWindowMinimized,
         width: 900,
         height: 700,
       })
     } catch (e) {
-      throw new LlmError(`Could not open a DeepSeek window: ${(e as Error).message}`, 'transport')
+      throw new LlmError(`Could not open a ${this.site.label} window: ${(e as Error).message}`, 'transport')
     }
 
     this.tabId = created.tabId
     this.windowId = created.windowId
-    log.info('Opened DeepSeek worker tab', { tabId: this.tabId })
+    log.info('Opened chat worker tab', { site: this.site.id, tabId: this.tabId })
     return created.tabId
   }
 
@@ -112,21 +129,28 @@ export class DeepSeekWebDriver implements LlmDriver {
     const deadline = Date.now() + timeoutMs
 
     while (Date.now() < deadline) {
-      const res = await ensureContentScript<DeepSeekResponse>(
+      const res = await ensureContentScript<ChatResponse>(
         tabId,
-        deepseekBridgeFiles(),
-        { type: 'ds:ping' },
+        chatBridgeFiles(),
+        { type: 'chat:ping' },
         { timeoutMs: Math.max(2000, deadline - Date.now()) }
       )
 
-      if (res && res.ok && res.type === 'ds:pong') {
-        if (!res.loggedIn) throw new LlmError('Not signed in to DeepSeek', 'not_logged_in')
+      if (res && res.ok && res.type === 'chat:pong') {
+        if (!res.loggedIn) {
+          throw new LlmError(
+            this.site.authRequired
+              ? `Not signed in to ${this.site.label}`
+              : `${this.site.label} is showing a sign-in dialog over the chat box`,
+            'not_logged_in'
+          )
+        }
         if (res.ready) return
       }
       // Signed in but the composer has not mounted yet: give the app a moment.
       await sleep(600)
     }
-    throw new LlmError('DeepSeek loaded but its chat box never appeared', 'not_ready')
+    throw new LlmError(`${this.site.label} loaded but its chat box never appeared`, 'not_ready')
   }
 
   /* ---------------------------------------------------------------- health */
@@ -146,22 +170,32 @@ export class DeepSeekWebDriver implements LlmDriver {
         // A slow page is not fatal; the poll below gives it more time.
       })
 
-      const res = await ensureContentScript<DeepSeekResponse>(
+      const res = await ensureContentScript<ChatResponse>(
         tabId,
-        deepseekBridgeFiles(),
-        { type: 'ds:status' },
+        chatBridgeFiles(),
+        { type: 'chat:status' },
         { timeoutMs: HEALTH_TIMEOUT_MS }
       )
 
       if (!res || !res.ok) {
-        return { status: 'unreachable', detail: res?.ok === false ? res.error : 'no response from the DeepSeek tab' }
+        return {
+          status: 'unreachable',
+          detail: res?.ok === false ? res.error : `no response from the ${this.site.label} tab`,
+        }
       }
-      if (res.type !== 'ds:status') return { status: 'unreachable', detail: 'unexpected reply from the bridge' }
-      if (!res.loggedIn) return { status: 'needs_login', detail: 'Sign in to chat.deepseek.com' }
+      if (res.type !== 'chat:status') return { status: 'unreachable', detail: 'unexpected reply from the bridge' }
+      if (!res.loggedIn) {
+        return {
+          status: 'needs_login',
+          detail: this.site.authRequired
+            ? `Sign in to ${this.site.chatUrl}`
+            : `${this.site.label} has a dialog over the chat box. Sign in and close it.`,
+        }
+      }
       if (!res.ready) {
         return {
           status: 'unreachable',
-          detail: 'Signed in, but the chat box was not found. DeepSeek may have changed its page.',
+          detail: `Signed in, but the chat box was not found. ${this.site.label} may have changed its page.`,
         }
       }
       return { status: 'ok', detail: res.detail }
@@ -173,7 +207,7 @@ export class DeepSeekWebDriver implements LlmDriver {
       if (/receiving end|never responded|Could not establish/i.test(message)) {
         return {
           status: 'unreachable',
-          detail: 'The DeepSeek tab did not respond. Open it, let it finish loading, then re-check.',
+          detail: `The ${this.site.label} tab did not respond. Open it, let it finish loading, then re-check.`,
         }
       }
       return { status: 'unreachable', detail: message }
@@ -212,25 +246,40 @@ export class DeepSeekWebDriver implements LlmDriver {
 
     await this.pace()
     this.lastSentAt = Date.now()
-    activity.note('sent the prompt to DeepSeek, waiting for a reply')
+    activity.note(`sent the prompt to ${this.site.label}, waiting for a reply`)
 
-    let res: DeepSeekResponse
+    let res: ChatResponse
     try {
       res = (await withTimeout(
-        chrome.tabs.sendMessage(tabId, { type: 'ds:send', requestId, prompt, timeoutMs }) as Promise<DeepSeekResponse>,
+        chrome.tabs.sendMessage(tabId, { type: 'chat:send', requestId, prompt, timeoutMs }) as Promise<ChatResponse>,
         timeoutMs + 15000,
-        'DeepSeek completion'
-      )) as DeepSeekResponse
+        `${this.site.label} completion`
+      )) as ChatResponse
     } catch (e) {
-      throw new LlmError(`DeepSeek transport failed: ${(e as Error).message}`, 'timeout')
+      throw new LlmError(`${this.site.label} transport failed: ${(e as Error).message}`, 'timeout')
     }
 
-    if (!res) throw new LlmError('DeepSeek bridge returned nothing', 'transport')
-    if (!res.ok) throw new LlmError(this.explain(res.error, res.code), res.code ?? 'transport')
-    if (res.type !== 'ds:reply') throw new LlmError('Unexpected reply from DeepSeek bridge', 'transport')
+    if (!res) throw new LlmError('Chat bridge returned nothing', 'transport')
+    if (!res.ok) throw new LlmError(this.explain(res.error, res.code), this.toCode(res.code))
+    if (res.type !== 'chat:reply') throw new LlmError(`Unexpected reply from the ${this.site.label} bridge`, 'transport')
 
     this.requestsSinceNewChat++
     return res.text
+  }
+
+  /** A bridge error code expressed in the driver's vocabulary. */
+  private toCode(code?: string): 'not_ready' | 'not_logged_in' | 'timeout' | 'busy' | 'dom_changed' | 'transport' {
+    if (code === 'exhausted') return 'transport'
+    if (
+      code === 'not_ready' ||
+      code === 'not_logged_in' ||
+      code === 'timeout' ||
+      code === 'busy' ||
+      code === 'dom_changed'
+    ) {
+      return code
+    }
+    return 'transport'
   }
 
   /**
@@ -251,7 +300,7 @@ export class DeepSeekWebDriver implements LlmDriver {
   async reset(): Promise<void> {
     if (this.tabId === null) return
     try {
-      await chrome.tabs.sendMessage(this.tabId, { type: 'ds:newChat' })
+      await chrome.tabs.sendMessage(this.tabId, { type: 'chat:newChat' })
       this.requestsSinceNewChat = 0
       await sleep(800)
     } catch {

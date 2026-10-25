@@ -1,8 +1,8 @@
-# AutoApply
+﻿# AutoApply
 
 A Chrome extension that finds jobs, scores them against your rules, tailors a resume and cover letter, fills the application form, and submits it — with a gate you control deciding how much of that it does without asking.
 
-It runs entirely on your machine. There is no server, no account, and no API key unless you want one: the default reasoning engine is a logged-in DeepSeek chat tab that the extension drives in a minimised window.
+It runs entirely on your machine. There is no server, no account, and no API key unless you want one: the default reasoning engine is a free web chat tab that the extension drives in a minimised window.
 
 ---
 
@@ -27,7 +27,7 @@ The settings page opens on first install. During development, `npm run dev` give
 
 Do these in order. Steps 1–3 take about fifteen minutes and everything afterwards depends on them.
 
-**1. Pick your engine.** Two options, API first: Settings → **Model** → Driver → **NVIDIA NIM**, paste a NIM key from build.nvidia.com and name a model (e.g. `meta/llama-3.1-405b-instruct`), then press *Run test*. If NIM goes down mid-run the agent fails over to the DeepSeek web tab for that request rather than parking the application — so as a safety net, still sign in at [chat.deepseek.com](https://chat.deepseek.com) in this browser. Pure free option: leave the driver on DeepSeek web and just sign in; the extension reuses that session and never sees your password. Either way, press *Run test* — you should get a JSON reply back.
+**1. Pick your engine.** Two options, API first: Settings → **Model** → Driver → **NVIDIA NIM**, paste a NIM key from build.nvidia.com and name a model (e.g. `meta/llama-3.1-405b-instruct`), then press *Run test*. If NIM goes down mid-run the agent fails over to the DeepAI web tab for that request rather than parking the application — so as a safety net, keep that tab working in this browser. Pure free option: leave the driver on **DeepAI web chat**; it works signed out, and if it ever starts refusing, switch to **DeepSeek web chat** in the same dropdown. Either way the extension reuses your session and never sees your password. Either way, press *Run test* — you should get a JSON reply back.
 
 **2. Drop your resume on the Profile page.** Settings → **Profile** → drag a PDF onto the box at the top. The model reads it and fills in everything below: name, contact details, every role with its bullets, education, skills. Takes about half a minute.
 
@@ -194,9 +194,13 @@ Settings → **Advanced** exports your settings, profile and searches as a JSON 
 
 ## When something breaks
 
-**"DeepSeek needs you to sign in."** Open the tab from the banner in the side panel and log in. The session expires periodically; this is normal.
+**"The model needs you to sign in"** (or a dialog is reported over the chat box). Open the tab from the banner in the side panel, sign in, and close the dialog. DeepAI allows anonymous chat, so this only appears when their login nudge or an out-of-credits dialog is actually covering the composer.
 
-**The model test fails, or replies stop arriving.** DeepSeek changed their page structure. This is the most fragile part of the system, and it is deliberately confined to one file, [`src/content/deepseek-bridge.ts`](src/content/deepseek-bridge.ts). You can repair it without rebuilding: Settings → **Model** → **Bridge selectors**, press *Load current*, and fix the CSS selectors. Turn off *Keep the worker window minimised* first so you can watch the conversation happen. If you would rather not maintain this, switch the driver to an API key — every other part of the system is unchanged by that.
+**The model test fails, or replies stop arriving.** The chat site changed its page structure. This is the most fragile part of the system, and it is deliberately confined to two files: the selectors live in [`src/llm/chat-sites.ts`](src/llm/chat-sites.ts) and the logic that uses them in [`src/content/chat-bridge.ts`](src/content/chat-bridge.ts). You can repair it without rebuilding: Settings → **Model** → **Bridge selectors**, press *Load current*, and fix the CSS selectors. That panel follows whichever web driver you have selected and edits that site's own selectors, so switching between DeepAI and DeepSeek does not carry one site's overrides onto the other. Turn off *Keep the worker window minimised* first so you can watch the conversation happen. If you would rather not maintain this, switch the driver to an API key — every other part of the system is unchanged by that.
+
+**"Chat site changed its page structure" is a guess, not a diagnosis.** A selector that no longer matches shows up as "the chat box never appeared", which reads the same as a login problem. Settings → **Diagnostics** → *Run the self-test* separates them: it checks that the chat bridge and the page agent are both present in the build, that the site-access grants are in place, and that a model call actually comes back. Run it before changing any selector.
+
+**Know this before you trust a free web driver.** Measured against the live DeepAI page on 27 September: there is **no "still generating" signal anywhere in the DOM.** The `is-streaming` class their own script checks for never appears — a MutationObserver saw 2,837 changes during a 26-second, 17,847-character reply and none mentioned it. The send button tracks composer content, not generation. The one element matching a stop/cancel selector is a hidden decoy: present before the send, throughout, and after, and never once visible. So "the text stopped changing" is the *only* evidence a reply has finished, and the window for it is set from measurement (chunks arrived every 60–650 ms). A pause longer than that window truncates a reply — which fails JSON validation in the broker and costs one retry, so it is survivable rather than silent, but it is a heuristic and not a guarantee. This is the strongest argument for an API key, and the honest limit of a free driver.
 
 **A site fills badly.** Settings → **Advanced** → *Try a single form*. It opens the URL, fills what it can, leaves the window open and outlines in amber anything it could not answer. Nothing is submitted. If a field is labelled confusingly, map it by hand in *Field overrides*.
 
@@ -224,7 +228,7 @@ npm run typecheck
 ```
 src/
   background/    service worker (message router, alarms) and the agent loop
-  llm/           driver interface, DeepSeek web driver, API drivers, JSON repair
+  llm/           driver interface, per-site chat profiles, API drivers, JSON repair
   storage/       zod schemas, IndexedDB repos, settings, the answer bank
   discovery/     board APIs and tab-driven scrapers
   matching/      deterministic prefilter, then model scoring
@@ -239,11 +243,15 @@ tests/fixtures/  real ATS form markup, one directory per vendor
 
 ### Adding support for a new ATS
 
-1. Save its application form's HTML into `tests/fixtures/<vendor>/application.html`.
+1. Save its application form's HTML into `tests/fixtures/<vendor>/application.html`. Capture the rendered DOM from a live posting rather than writing it by hand — see below for why that distinction decides whether the fixture is worth anything.
 2. Write the adapter in `src/sites/<vendor>/index.ts` — `detect`, `canonicalKey`, submit and success selectors — and register it in `src/sites/registry.ts` ahead of the generic adapter.
 3. Add a block to `tests/harvester.test.ts` asserting which question each control is asking and which profile field answers it.
 
-Those fixture tests are what catch adapter rot: when a vendor changes their markup, the suite fails before a user finds out by having an application filled in wrongly. Every production failure is worth turning into a new fixture.
+Those fixture tests are what catch adapter rot: when a vendor changes their markup, the suite fails before a user finds out by having an application filled in wrongly.
+
+**Capture the real page, do not hand-write it.** A hand-written fixture only proves the code works against the shape you already thought of, so a whole class of real markup can be missing while the suite stays green. That is not hypothetical: the Ashby fixture was 1.2 KB with two native radios in it, while a live OpenAI form carries a Yes/No button pair, three EEO radio groups and a location combobox. Because none of that was in the fixture, 637 tests passed over a harvester that read every one of those fields wrong — work authorisation, sponsorship and office attendance all arrived as three identical required checkboxes labelled "No". Save the rendered DOM (`tests/fixtures/ashby/application-live-2026-09-27.html` is a captured one) and assert on what it actually yields, not only on what you expect it to.
+
+Two traps when capturing one: strip `<script>`/`<style>`, and drop cross-origin `<iframe>`s — a reCAPTCHA frame makes the test DOM fetch the network on load and surfaces as an unhandled error.
 
 ### A note on the two content scripts
 
@@ -253,6 +261,6 @@ All judgement happens in the service worker; the content scripts only describe t
 
 ## Terms of service
 
-Greenhouse, Lever, Ashby, Workable and SmartRecruiters publish their boards openly and place no restriction on applying programmatically on your own behalf. **Indeed's terms prohibit automated interaction and it actively fingerprints for it** — it ships disabled, capped low, and is best used as a discovery source whose listings redirect to a real ATS. Naukri is more permissive. Driving the DeepSeek web UI is a grey area in their terms; the API-key drivers exist partly for that reason.
+Greenhouse, Lever, Ashby, Workable and SmartRecruiters publish their boards openly and place no restriction on applying programmatically on your own behalf. **Indeed's terms prohibit automated interaction and it actively fingerprints for it** — it ships disabled, capped low, and is best used as a discovery source whose listings redirect to a real ATS. Naukri is more permissive. Driving a consumer chat UI is a grey area in both DeepAI's and DeepSeek's terms, and free tiers run out of credits; the API-key drivers exist partly for that reason.
 
 You are the one applying. Read what goes out, at least until you trust it.

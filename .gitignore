@@ -2,6 +2,8 @@ node_modules/
 dist/
 .vite/
 *.log
+# Vite writes these beside vite.config.ts while loading it; they are transient.
+vite.config.ts.timestamp-*.mjs
 .DS_Store
 .env
 .env.local

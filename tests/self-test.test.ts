@@ -1,4 +1,4 @@
-/**
+﻿/**
  * The self-test has to be trustworthy before it is useful.
  *
  * Two ways it could do harm, and both are tested here. It could pass by
@@ -17,7 +17,7 @@ const state = {
   allSitesGranted: true,
   alarms: [{ name: 'autoapply:cycle' }, { name: 'autoapply:maintenance' }],
   contentScripts: [
-    { matches: ['https://chat.deepseek.com/*'], js: ['assets/deepseek-bridge.js'] },
+    { matches: ['https://deepai.org/*', 'https://chat.deepseek.com/*'], js: ['assets/chat-bridge.js'] },
     { matches: ['https://boards.greenhouse.io/*'], js: ['assets/form-agent.js'] },
   ] as Array<{ matches: string[]; js: string[] }>,
   modelAnswer: { answer: 'ready', count: 3 } as unknown,
@@ -56,6 +56,10 @@ vi.mock('@/background/run-history', () => ({ getRecipeHealth: vi.fn(async () => 
 vi.mock('@/background/run-state', () => ({ isHalted: vi.fn(async () => state.halted) }))
 vi.mock('@/shared/injection', () => ({
   formAgentFiles: vi.fn(() => state.contentScripts[1]?.js ?? []),
+  // Also stubbed because the chat-bridge check calls it. Leaving it out makes
+  // the check throw, which the harness records as a failure -- the suite caught
+  // exactly that omission when this check was added.
+  chatBridgeFiles: vi.fn(() => state.contentScripts[0]?.js ?? []),
 }))
 vi.mock('@/runner/apply-machine', () => ({ probeJobPage: vi.fn() }))
 vi.mock('@/shared/activity', () => ({
@@ -159,11 +163,11 @@ describe('the failures it is for', () => {
   })
 
   it('catches a build with no page agent in it', async () => {
-    state.contentScripts = [{ matches: ['https://chat.deepseek.com/*'], js: ['assets/deepseek-bridge.js'] }]
+    state.contentScripts = [{ matches: ['https://deepai.org/*', 'https://chat.deepseek.com/*'], js: ['assets/chat-bridge.js'] }]
     installFakeChrome()
     expect(find(await runSelfTest(), 'contentScript')?.status).toBe('fail')
     state.contentScripts = [
-      { matches: ['https://chat.deepseek.com/*'], js: ['assets/deepseek-bridge.js'] },
+      { matches: ['https://deepai.org/*', 'https://chat.deepseek.com/*'], js: ['assets/chat-bridge.js'] },
       { matches: ['https://boards.greenhouse.io/*'], js: ['assets/form-agent.js'] },
     ]
   })

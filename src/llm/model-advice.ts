@@ -36,8 +36,10 @@ const INSTRUCT_MARKERS = ['instruct', '-it', 'chat', 'nemotron', 'hermes', 'tulu
 export const PICK_A_MODEL_HINT =
   'Press "List available models" to see what this key can call, and pick one with "instruct" in its name.'
 
+import { isWebDriver } from './chat-sites'
+
 export function assessModel(driver: string, model: string): ModelVerdict | null {
-  if (driver === 'deepseek-web') return null
+  if (isWebDriver(driver)) return null
   const name = String(model ?? '')
     .trim()
     .toLowerCase()

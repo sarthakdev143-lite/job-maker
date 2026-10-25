@@ -16,6 +16,7 @@ import { orchestrator } from './orchestrator'
 import { setUpSearchesFromProfile } from '@/discovery/setup'
 import { deleteRecipe, getProfile, getRecipes, getSettings, profileIsUsable, saveRecipe, saveSettings } from '@/storage/settings'
 import { llm } from '@/llm/broker'
+import { isWebDriver } from '@/llm/chat-sites'
 import { createLogger } from '@/shared/logger'
 import { activity } from '@/shared/activity'
 import type { AgentState } from '@/shared/messages'
@@ -61,7 +62,7 @@ export async function startAutopilot(): Promise<AutopilotResult> {
   if (health.status !== 'ok') {
     throw new Error(
       health.status === 'needs_login'
-        ? 'Sign in to chat.deepseek.com first - the tab is already open. Then press this again.'
+        ? 'Open the model tab that is already open, sign in, and close the dialog. Then press this again.'
         : `The language model is not reachable: ${health.detail}`
     )
   }
@@ -148,7 +149,7 @@ export async function startAutopilot(): Promise<AutopilotResult> {
     llm: {
       ...settings.llm,
       // Chrome throttles timers in minimized windows hard enough to starve both
-      // Cloudflare's challenge script and DeepSeek's own reply stream -- the
+      // Cloudflare's challenge script and the chat site's own reply stream -- the
       // two failures that look like "blocked" and "model timeout" at 3am. An
       // unfocused visible window costs nothing overnight and removes both.
       keepWindowMinimized: false,
@@ -156,7 +157,7 @@ export async function startAutopilot(): Promise<AutopilotResult> {
       // fallback quickly rather than burning the full web-scale timeout on
       // every retry. Web driver keeps whatever the user configured.
       requestTimeoutMs:
-        settings.llm.driver === 'deepseek-web'
+        isWebDriver(settings.llm.driver)
           ? settings.llm.requestTimeoutMs
           : Math.min(settings.llm.requestTimeoutMs, 90_000),
     },

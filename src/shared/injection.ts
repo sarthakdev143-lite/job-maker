@@ -11,15 +11,23 @@
  * reloaded, and a domain the user added by hand.
  */
 
-const DEEPSEEK_HINT = 'deepseek'
+/**
+ * Hostnames the chat bridge runs on.
+ *
+ * Kept in step with `CHAT_SITES` in src/llm/chat-sites.ts. Matching on a
+ * hostname rather than the substring "deepseek" is what lets one built file
+ * serve DeepAI and DeepSeek alike -- the old hint stopped identifying the
+ * bridge the moment a second chat site existed.
+ */
+const CHAT_HOSTS = ['deepai.org', 'chat.deepseek.com']
 
 function manifestScripts(): chrome.runtime.ManifestV3['content_scripts'] {
   return chrome.runtime.getManifest().content_scripts ?? []
 }
 
-/** Built file paths for the DeepSeek bridge. */
-export function deepseekBridgeFiles(): string[] {
-  const entry = manifestScripts()?.find((s) => s.matches?.some((m) => m.includes(DEEPSEEK_HINT)))
+/** Built file paths for the chat-site bridge. */
+export function chatBridgeFiles(): string[] {
+  const entry = manifestScripts()?.find((s) => s.matches?.some((m) => CHAT_HOSTS.some((host) => m.includes(host))))
   return entry?.js ?? []
 }
 
@@ -27,14 +35,14 @@ export function deepseekBridgeFiles(): string[] {
  * Built file paths for the form agent.
  *
  * Two declared scripts now match the job sites -- the agent itself and the
- * page-world visibility shim -- so "the entry that is not DeepSeek" is no
+ * page-world visibility shim -- so "the entry that is not the chat bridge" is no
  * longer specific enough. The shim runs in the MAIN world and is never injected
  * programmatically, which is exactly what distinguishes them.
  */
 export function formAgentFiles(): string[] {
   const entry = manifestScripts()?.find(
     (s) =>
-      !s.matches?.some((m) => m.includes(DEEPSEEK_HINT)) &&
+      !s.matches?.some((m) => CHAT_HOSTS.some((host) => m.includes(host))) &&
       (s as { world?: string }).world !== 'MAIN'
   )
   return entry?.js ?? []

@@ -15,7 +15,7 @@
  * submitting an application with a silently empty required field.
  */
 
-import { resolveSelector } from './selector'
+import { queryByAttr, oneByAttr, resolveSelector } from './selector'
 import { createLogger } from '@/shared/logger'
 import { normalizeText, similarity } from '@/shared/text'
 import { personaForPage, type Persona } from '@/human/persona'
@@ -24,6 +24,10 @@ import { driftDuring, humanClick, humanScrollTo, readingPauseMs } from '@/human/
 import type { FilledField } from '@/storage/schemas'
 
 const log = createLogger('filler')
+
+function attr(el: Element, name: string): string {
+  return (el.getAttribute(name) ?? '').trim()
+}
 
 const TRUTHY = new Set(['true', 'yes', 'y', '1', 'on', 'checked'])
 
@@ -103,6 +107,141 @@ function tabAway(el: HTMLElement): void {
   fire(el, 'blur')
 }
 
+/**
+ * Choose an option in a group built from ARIA roles rather than from `<input>`s.
+ *
+ * Every writer above is written in terms of `HTMLInputElement` and a shared
+ * `name`, so a `div[role="radiogroup"]` holding `div[role="radio"]` members hit
+ * none of them: no group name to query by, and `fillCheckbox` refused a
+ * non-input outright. The result was a `no writer matched` failure on a
+ * question the page renders exactly as a person would answer it.
+ *
+ * These widgets also do not toggle on `.click()` alone -- react-aria and
+ * Workday's own widget both keep the selection in `aria-checked` -- so the
+ * attribute is verified and set as a fallback, the same way the native writers
+ * treat `.checked`.
+ */
+function ariaMembers(el: HTMLElement): HTMLElement[] {
+  if (attr(el, 'role') === 'radio' || attr(el, 'role') === 'option') return [el]
+  if (attr(el, 'role') === 'checkbox' || attr(el, 'role') === 'switch') return [el]
+  const radios = Array.from(el.querySelectorAll<HTMLElement>('[role="radio"], [role="option"]'))
+  return radios.length ? radios : Array.from(el.querySelectorAll<HTMLElement>('[role="checkbox"]'))
+}
+
+function ariaLabel(m: HTMLElement): string {
+  return normalizeText(m.innerText ?? m.textContent ?? attr(m, 'aria-label') ?? '')
+}
+
+function ariaValue(m: HTMLElement): string {
+  return attr(m, 'data-value') || attr(m, 'value') || ariaLabel(m)
+}
+
+function isAriaChecked(m: HTMLElement): boolean {
+  return attr(m, 'aria-checked') === 'true' || (m as HTMLInputElement).checked === true
+}
+
+function setAriaChecked(m: HTMLElement, on: boolean): void {
+  if (isAriaChecked(m) === on) return
+  m.setAttribute('aria-checked', String(on))
+  fire(m, 'input')
+  fire(m, 'change')
+  fire(m, 'click')
+}
+
+/** Match an answer to a member the way the native writers match an option. */
+function matchAriaMember(members: HTMLElement[], value: string): HTMLElement | null {
+  const target = normalizeText(value)
+  const exact =
+    members.find((m) => normalizeText(ariaValue(m)) === target) ??
+    members.find((m) => ariaLabel(m) === target)
+  if (exact) return exact
+
+  let best: { m: HTMLElement; s: number } | null = null
+  for (const m of members) {
+    const s = Math.max(similarity(value, ariaValue(m)), similarity(value, ariaLabel(m)))
+    if (s >= 0.7 && (!best || s > best.s)) best = { m, s }
+  }
+  return best?.m ?? null
+}
+
+async function fillAriaGroup(
+  el: HTMLElement,
+  value: string,
+  persona: Persona,
+  multiple: boolean
+): Promise<boolean> {
+  const members = ariaMembers(el)
+  if (members.length === 0) return false
+
+  // A multi-select group may be answered with several options at once.
+  const wanted = multiple
+    ? value.split(/[,;|\n]|\band\b/).map((v) => v.trim()).filter(Boolean)
+    : [value]
+  if (wanted.length === 0) return false
+
+  let acted = 0
+  for (const want of wanted) {
+    const member = matchAriaMember(members, want)
+    if (!member) continue
+    if (multiple && isAriaChecked(member)) continue
+    await humanClick(member, { pressMs: persona.pressMs })
+    if (!isAriaChecked(member)) setAriaChecked(member, true)
+    if (isAriaChecked(member)) acted++
+  }
+
+  return members.some(isAriaChecked) && acted > 0
+}
+
+async function fillAriaToggle(el: HTMLElement, value: string, persona: Persona): Promise<boolean> {
+  const want = TRUTHY.has(normalizeText(value))
+  if (isAriaChecked(el) !== want) {
+    await humanClick(el, { pressMs: persona.pressMs })
+    if (isAriaChecked(el) !== want) setAriaChecked(el, want)
+  }
+  return isAriaChecked(el) === want
+}
+
+/** Is this a Yes/No button pair rather than a set of options? */
+function isYesNoPair(el: HTMLElement): boolean {
+  return (
+    el.querySelectorAll('button[data-option], [role="radio"][data-option], button[aria-pressed]').length >= 2
+  )
+}
+
+/**
+ * Ashby's Yes/No widget: press the button, not the hidden checkbox behind it.
+ *
+ * The checkbox is `tabindex="-1"` and carries the value; the two
+ * `button[data-option]` elements carry the state, through `aria-pressed`. The
+ * control is driven by pressing a button, and the backing checkbox is updated
+ * by the widget in response -- writing to it directly would leave the visible
+ * control showing the other answer.
+ */
+async function fillYesNo(el: HTMLElement, value: string, persona: Persona): Promise<boolean> {
+  const buttons = Array.from(
+    el.querySelectorAll<HTMLElement>('button[data-option], [role="radio"][data-option], button[aria-pressed]')
+  )
+  if (buttons.length < 2) return false
+
+  const target = normalizeText(value)
+  const match =
+    buttons.find((b) => normalizeText(ariaValue(b)) === target) ??
+    buttons.find((b) => ariaLabel(b) === target)
+  if (!match) return false
+
+  if (attr(match, 'aria-pressed') !== 'true') {
+    await humanClick(match, { pressMs: persona.pressMs })
+    if (attr(match, 'aria-pressed') !== 'true') {
+      // The widget did not react; set the state and tell it, rather than
+      // reporting a press that visibly did nothing as a success.
+      for (const b of buttons) b.setAttribute('aria-pressed', String(b === match))
+      fire(match, 'click')
+      fire(match, 'change')
+    }
+  }
+  return buttons.some((b) => attr(b, 'aria-pressed') === 'true')
+}
+
 async function fillText(
   el: HTMLInputElement | HTMLTextAreaElement,
   value: string,
@@ -155,9 +294,7 @@ async function fillRadio(
   doc: Document,
   persona: Persona
 ): Promise<boolean> {
-  const members = Array.from(
-    doc.querySelectorAll<HTMLInputElement>(`input[type="radio"][name="${CSS.escape(groupName)}"]`)
-  )
+  const members = queryByAttr(doc, 'input[type="radio"]', 'name', groupName) as HTMLInputElement[]
   if (members.length === 0) return false
   const target = normalizeText(value)
 
@@ -187,7 +324,7 @@ async function fillRadio(
 
 /** The visible words next to a checkbox or radio, however the page attaches them. */
 function optionLabel(input: HTMLInputElement, doc: Document): string {
-  const byFor = input.id ? doc.querySelector(`label[for="${CSS.escape(input.id)}"]`) : null
+  const byFor = input.id ? oneByAttr(doc, 'label', 'for', input.id) : null
   const wrapping = input.closest('label')
   return normalizeText(
     (byFor as HTMLElement | null)?.innerText ??
@@ -214,9 +351,7 @@ async function fillCheckboxGroup(
   doc: Document,
   persona: Persona
 ): Promise<boolean> {
-  const members = Array.from(
-    doc.querySelectorAll<HTMLInputElement>(`input[type="checkbox"][name="${CSS.escape(groupName)}"]`)
-  )
+  const members = queryByAttr(doc, 'input[type="checkbox"]', 'name', groupName) as HTMLInputElement[]
   if (members.length === 0) return false
 
   // An answer may name several options at once.
@@ -411,6 +546,34 @@ function readBack(el: HTMLElement, doc: Document): string {
     return el.value
   }
   if (el instanceof HTMLTextAreaElement) return el.value
+
+  // A choice group built from ARIA roles. Its innerText is every option
+  // concatenated ("YesNo"), so reading it back would verify an unanswered
+  // group as filled. What matters is which member is selected.
+  const role = attr(el, 'role')
+  if (role === 'radio' || role === 'option') {
+    return isAriaChecked(el) ? ariaLabel(el) : ''
+  }
+  if (role === 'checkbox' || role === 'switch') {
+    return String(isAriaChecked(el))
+  }
+  if (role === 'radiogroup' || role === 'listbox') {
+    const checked = ariaMembers(el).find(isAriaChecked)
+    return checked ? ariaLabel(checked) : ''
+  }
+
+  // A Yes/No button pair. The backing checkbox holds the value for the widget's
+  // own bookkeeping and reads empty, so verifying against it reported a press
+  // that had visibly worked as "value did not stick" -- the same reason the
+  // combobox display is read from the widget rather than the input.
+  const yesNo = Array.from(
+    el.querySelectorAll<HTMLElement>('button[data-option], [role="radio"][data-option], button[aria-pressed]')
+  )
+  if (yesNo.length >= 2) {
+    const pressed = yesNo.find((b) => attr(b, 'aria-pressed') === 'true')
+    return pressed ? ariaLabel(pressed) : ''
+  }
+
   const inner = el.querySelector('input')
   if (inner) return inner.value
   return (el.innerText ?? '').trim()
@@ -477,16 +640,39 @@ export async function applyFillPlan(
               : await fillCombobox(el, field.value, doc, persona)
           break
         case 'radio': {
+          // Ashby's Yes/No pair: the buttons are the control.
+          if (!(el instanceof HTMLInputElement) && isYesNoPair(el)) {
+            wrote = await fillYesNo(el, field.value, persona)
+            break
+          }
+          // A group rendered with ARIA roles instead of `<input type=radio>`
+          // carries no `name` and is not an input; the native writers cannot
+          // address it, so it is driven directly.
+          if (!(el instanceof HTMLInputElement)) {
+            wrote = await fillAriaGroup(el, field.value, persona, false)
+            break
+          }
           const group = (field as FilledField & { group?: string }).group || el.getAttribute('name') || ''
           wrote = group ? await fillRadio(group, field.value, doc, persona) : false
           if (!wrote && el instanceof HTMLInputElement) wrote = await fillCheckbox(el, 'true', persona)
           break
         }
         case 'checkbox': {
+          if (!(el instanceof HTMLInputElement)) {
+            // A group of boxes is a multi-select question; a lone switch is a
+            // yes/no. More than one member means the former.
+            const members = ariaMembers(el)
+            wrote =
+              members.length > 1
+                ? await fillAriaGroup(el, field.value, persona, true)
+                : await fillAriaToggle(el, field.value, persona)
+            groupTicked = wrote
+            break
+          }
           // A named group of boxes is a multi-select question, not a yes/no.
           const group = (field as FilledField & { group?: string }).group || el.getAttribute('name') || ''
           const members = group
-            ? doc.querySelectorAll(`input[type="checkbox"][name="${CSS.escape(group)}"]`).length
+            ? queryByAttr(doc, 'input[type="checkbox"]', 'name', group).length
             : 0
           if (members > 1) {
             wrote = await fillCheckboxGroup(group, field.value, doc, persona)
@@ -537,7 +723,12 @@ export async function applyFillPlan(
       // clothes: Lever's location field has no ARIA whatsoever and simply
       // discards anything not chosen from its dropdown. Try it as one before
       // reporting a required field as unfillable.
-      if (wrote && !verified && !isDropdown && !readBack(el, doc).trim()) {
+      //
+      // Never for a choice widget: those hold no text, so an unselected group
+      // always reads back empty and this would re-drive it as a dropdown,
+      // typing into a radiogroup and clicking whatever member it landed on.
+      const isChoice = field.kind === 'radio' || field.kind === 'checkbox'
+      if (wrote && !verified && !isDropdown && !isChoice && !readBack(el, doc).trim()) {
         const picked = await fillCombobox(el, field.value, doc, persona)
         verified = picked && Boolean(readBack(el, doc).trim())
         if (verified) {

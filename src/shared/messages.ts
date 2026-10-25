@@ -2,7 +2,7 @@
  * The single typed message protocol for the extension.
  *
  * Three senders talk to the service worker: the UI surfaces (side panel,
- * options, popup), the DeepSeek bridge content script, and the form agent
+ * options, popup), the chat-site bridge content script, and the form agent
  * content script. Everything is request/response over chrome.runtime with a
  * discriminated union, so adding a message without handling it is a type error
  * in the worker's router.
@@ -89,28 +89,43 @@ export type UiRequest =
   | { type: 'ui:downloadDoc'; docId: string }
   | { type: 'ui:dryRunUrl'; url: string }
 
-/* ------------------------------------- background -> DeepSeek content script */
+/* ------------------------------------ background -> chat-site content script */
 
-/** Sent by the bridge while a reply streams in, purely so the UI can prove it is alive. */
-export type DeepSeekProgress = {
-  type: 'ds:progress'
+/**
+ * Sent by the bridge while a reply streams in, purely so the UI can prove it is
+ * alive.
+ *
+ * Named for the channel, not the vendor: the bridge serves DeepAI and DeepSeek
+ * alike, and a `ds:` prefix outlived the assumption that DeepSeek was the only
+ * site.
+ */
+export type ChatProgress = {
+  type: 'chat:progress'
   requestId: string
   chars: number
   generating: boolean
 }
 
-export type DeepSeekRequest =
-  | { type: 'ds:ping' }
-  | { type: 'ds:status' }
-  | { type: 'ds:newChat' }
-  | { type: 'ds:send'; requestId: string; prompt: string; timeoutMs: number }
+export type ChatRequest =
+  | { type: 'chat:ping' }
+  | { type: 'chat:status' }
+  | { type: 'chat:newChat' }
+  | { type: 'chat:send'; requestId: string; prompt: string; timeoutMs: number }
 
-export type DeepSeekResponse =
-  | { ok: true; type: 'ds:pong'; ready: boolean; loggedIn: boolean }
-  | { ok: true; type: 'ds:status'; ready: boolean; loggedIn: boolean; busy: boolean; detail: string }
-  | { ok: true; type: 'ds:newChat' }
-  | { ok: true; type: 'ds:reply'; requestId: string; text: string }
-  | { ok: false; error: string; code?: 'not_ready' | 'not_logged_in' | 'timeout' | 'busy' | 'dom_changed' }
+export type ChatBridgeErrorCode =
+  | 'not_ready'
+  | 'not_logged_in'
+  | 'timeout'
+  | 'busy'
+  | 'dom_changed'
+  | 'exhausted'
+
+export type ChatResponse =
+  | { ok: true; type: 'chat:pong'; ready: boolean; loggedIn: boolean; site: string }
+  | { ok: true; type: 'chat:status'; ready: boolean; loggedIn: boolean; busy: boolean; detail: string; site: string }
+  | { ok: true; type: 'chat:newChat' }
+  | { ok: true; type: 'chat:reply'; requestId: string; text: string }
+  | { ok: false; error: string; code?: ChatBridgeErrorCode }
 
 /* ---------------------------------------- background -> form content script */
 
@@ -221,7 +236,7 @@ export type BroadcastEvent =
 
 /* ------------------------------------------------------------- envelope */
 
-export type AnyRequest = UiRequest | DeepSeekRequest | FormRequest
+export type AnyRequest = UiRequest | ChatRequest | FormRequest
 
 export type Ok<T> = { ok: true; data: T }
 export type Err = { ok: false; error: string }
@@ -302,7 +317,7 @@ export function explainWorkerError(error: string): string {
 }
 
 /** Typed wrapper around chrome.tabs.sendMessage for worker -> content script. */
-export async function sendToTab<R>(tabId: number, msg: FormRequest | DeepSeekRequest, frameId?: number): Promise<R> {
+export async function sendToTab<R>(tabId: number, msg: FormRequest | ChatRequest, frameId?: number): Promise<R> {
   const options = frameId === undefined ? undefined : { frameId }
   const res = (await chrome.tabs.sendMessage(tabId, msg, options as chrome.tabs.MessageSendOptions)) as R | undefined
   if (res === undefined) throw new Error('No response from content script')

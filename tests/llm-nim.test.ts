@@ -1,5 +1,5 @@
-/**
- * NVIDIA NIM as first priority, DeepSeek web as second.
+﻿/**
+ * NVIDIA NIM as first priority, the free DeepAI web driver as second.
  *
  * NIM speaks OpenAI-compatible /chat/completions, but publishes its base URL
  * with `/v1` already attached -- appending another one 404s every call. And
@@ -138,7 +138,7 @@ describe('broker failover order', () => {
     )
     expect(err).toBeInstanceOf(LlmError)
     expect((err as Error).message).toMatch(/NVIDIA NIM/)
-    expect((err as Error).message).toMatch(/DeepSeek \(web\)/)
+    expect((err as Error).message).toMatch(/DeepAI \(web\)/)
   })
 
   it('fails fast on a bad key without touching the fallback', async () => {
@@ -159,6 +159,6 @@ describe('broker failover order', () => {
     )
     expect(err).toBeInstanceOf(LlmError)
     expect((err as unknown as LlmError).code).toBe('config')
-    expect((err as Error).message).not.toMatch(/DeepSeek \(web\)/)
+    expect((err as Error).message).not.toMatch(/DeepAI \(web\)/)
   })
 })

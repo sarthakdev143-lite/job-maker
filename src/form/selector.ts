@@ -18,11 +18,59 @@ const STABLE_ATTRS = [
   'aria-label',
 ]
 
+/**
+ * CSS.escape is for escaping an *identifier* -- the `#foo` position, where a
+ * leading digit genuinely does need escaping as `\33 `.
+ *
+ * It must never be used inside a quoted attribute value, which is a different
+ * grammar: there the backslash is a string escape, so the space in `\33 ` is
+ * swallowed and the comparison is made against a name that does not exist. On a
+ * real Ashby form every `name` and `id` begins with a UUID, so
+ * `[name="${CSS.escape(name)}"]` matched nothing at all: radio and checkbox
+ * groups were harvested with zero options, their labels fell through to a
+ * leaked class name ("Input gender" instead of "Gender"), the same broken query
+ * in the filler meant a selected option could never be written, and
+ * `buildSelector` handed back selectors that resolved to nothing, so the field
+ * was reported as "element not found".
+ *
+ * Inside a quoted string only `"` and `\` need escaping.
+ */
+function cssQuote(value: string): string {
+  return value.replace(/["\\]/g, '\\$&')
+}
+
 /** CSS.escape is present in every Chrome we target; this is belt and braces. */
 function cssEscape(value: string): string {
   const fn = (globalThis as { CSS?: { escape?: (s: string) => string } }).CSS?.escape
   if (fn) return fn(value)
   return value.replace(/([^\w-])/g, '\\$1')
+}
+
+/**
+ * Every element matching `selector` whose `attr` is exactly `value`.
+ *
+ * A filter rather than a selector, so no amount of awkward characters in an
+ * attribute value -- a leading digit, a space, a quote, an underscore -- can
+ * produce a query that silently matches nothing.
+ */
+export function queryByAttr(
+  root: ParentNode,
+  selector: string,
+  attr: string,
+  value: string
+): HTMLElement[] {
+  try {
+    return Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(
+      (el) => el.getAttribute(attr) === value
+    )
+  } catch {
+    return []
+  }
+}
+
+/** The single element with `attr="value"`, or null. */
+export function oneByAttr(root: ParentNode, selector: string, attr: string, value: string): HTMLElement | null {
+  return queryByAttr(root, selector, attr, value)[0] ?? null
 }
 
 /** React and Emotion generate ids like ":r3:" and "css-1x2y3z" that change per render. */
@@ -65,18 +113,18 @@ export function buildSelector(el: Element, doc: Document = document): string {
   for (const attr of STABLE_ATTRS) {
     const value = el.getAttribute(attr)
     if (!value || looksGenerated(value)) continue
-    const sel = `${tag}[${attr}="${cssEscape(value)}"]`
+    const sel = `${tag}[${attr}="${cssQuote(value)}"]`
     if (isUnique(doc, sel)) return sel
   }
 
   const name = el.getAttribute('name')
   if (name) {
-    const sel = `${tag}[name="${cssEscape(name)}"]`
+    const sel = `${tag}[name="${cssQuote(name)}"]`
     if (isUnique(doc, sel)) return sel
     // Radio groups legitimately share a name; disambiguate by value.
     const value = el.getAttribute('value')
     if (value) {
-      const withValue = `${tag}[name="${cssEscape(name)}"][value="${cssEscape(value)}"]`
+      const withValue = `${tag}[name="${cssQuote(name)}"][value="${cssQuote(value)}"]`
       if (isUnique(doc, withValue)) return withValue
     }
   }

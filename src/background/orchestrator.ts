@@ -218,7 +218,7 @@ class Orchestrator {
         health.status === 'ok'
           ? health.detail || 'ready'
           : health.status === 'needs_login'
-            ? 'Sign in to chat.deepseek.com, or set an API key'
+            ? 'Sign in to the chat site, or set an API key'
             : health.detail,
       fix: 'model',
       blocking: true,

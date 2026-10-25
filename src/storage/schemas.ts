@@ -301,24 +301,29 @@ export type AutonomyMode = z.infer<typeof AutonomyModeSchema>
 /* -------------------------------------------------------------- llm config */
 
 export const LlmConfigSchema = z.object({
-  driver: z.enum(['deepseek-web', 'anthropic-api', 'openai-compatible', 'nvidia-nim']).default('deepseek-web'),
+  /**
+   * `deepai-web` and `deepseek-web` are the two free browser-driven options.
+   * Everything else talks to a provider's API with a key.
+   */
+  driver: z
+    .enum(['deepai-web', 'deepseek-web', 'anthropic-api', 'openai-compatible', 'nvidia-nim'])
+    .default('deepai-web'),
   apiKey: z.string().default(''),
   apiBaseUrl: z.string().default(''),
   model: z.string().default(''),
-  /** Keep the DeepSeek worker window minimized and out of the way. */
+  /** Keep the chat worker window minimized and out of the way. */
   keepWindowMinimized: z.boolean().default(true),
   requestTimeoutMs: z.number().default(180000),
   maxRetries: z.number().default(2),
-  /** Start a fresh DeepSeek conversation every N requests to bound context. */
+  /** Start a fresh conversation every N requests to bound context. */
   newChatEveryNRequests: z.number().default(8),
   /**
-   * Minimum gap between two prompts on the DeepSeek web driver.
+   * Minimum gap between two prompts on a browser-driven chat site.
    *
    * The consumer chat product is sized for a person typing, not for a loop.
    * Pacing requests keeps the load we put on it modest, which is both the
    * polite thing to do and what keeps an account in good standing. The
-   * supported way to run at speed is DeepSeek's paid API (the
-   * "openai-compatible" driver), not a faster scraper.
+   * supported way to run at speed is a paid API driver, not a faster scraper.
    */
   minRequestGapMs: z.number().default(5000),
 })

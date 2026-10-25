@@ -41,6 +41,16 @@ export const BOARD_API_MATCHES = [
   'https://api.ashbyhq.com/*',
 ]
 
+/**
+ * Chat sites the reasoning engine can be driven through.
+ *
+ * Kept in step with `CHAT_SITES` in src/llm/chat-sites.ts, which is where the
+ * per-site selectors live. DeepAI is the default web driver; DeepSeek is kept
+ * as an alternative so a free driver that starts refusing sessions is not a dead
+ * end.
+ */
+export const CHAT_MATCHES = ['https://deepai.org/*', 'https://chat.deepseek.com/*']
+
 export default defineManifest({
   manifest_version: 3,
   name: 'AutoApply - autonomous job agent',
@@ -65,7 +75,9 @@ export default defineManifest({
   ],
 
   host_permissions: [
-    'https://chat.deepseek.com/*',
+    // Chat sites the reasoning engine is driven through. The service worker
+    // opens a tab on one of these and the bridge runs inside it.
+    ...CHAT_MATCHES,
     // LLM API endpoints: required so the service worker can fetch them
     // without a CORS preflight failure ("Failed to fetch"). Optional
     // `https://*/*` exists for custom bases, but the common providers must
@@ -98,8 +110,11 @@ export default defineManifest({
 
   content_scripts: [
     {
-      matches: ['https://chat.deepseek.com/*'],
-      js: ['src/content/deepseek-bridge.ts'],
+      // The chat bridge resolves its own site from the URL, so one built file
+      // serves every chat site listed here. Adding a third needs a new match
+      // pattern and a profile, not a new content script.
+      matches: CHAT_MATCHES,
+      js: ['src/content/chat-bridge.ts'],
       run_at: 'document_idle',
     },
     {

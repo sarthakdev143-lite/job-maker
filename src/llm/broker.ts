@@ -7,9 +7,10 @@
  * driver is a browser tab that can only do one thing at a time.
  */
 
-import { DeepSeekWebDriver } from './drivers/deepseek-web'
+import { ChatWebDriver } from './drivers/chat-web'
 import { AnthropicDriver, NimDriver, OpenAiCompatibleDriver } from './drivers/api'
 import { LlmError, isRetryable, type CompleteRequest, type LlmDriver, type LlmHealth } from './driver'
+import { DEEPAI, siteById } from './chat-sites'
 import { JSON_CONTRACT } from '@/storage/defaults'
 import { StructuredParseError, parseStructured, retryInstruction } from './structured'
 import { getSettings } from '@/storage/settings'
@@ -56,8 +57,10 @@ class LlmBroker {
       case 'openai-compatible':
         return new OpenAiCompatibleDriver(config)
       case 'deepseek-web':
+        return new ChatWebDriver(config, siteById('deepseek-web') ?? DEEPAI)
+      case 'deepai-web':
       default:
-        return new DeepSeekWebDriver(config)
+        return new ChatWebDriver(config, DEEPAI)
     }
   }
 
@@ -87,15 +90,20 @@ class LlmBroker {
   }
 
   /**
-   * The web driver behind an API primary, or null when the web driver *is* the
+   * The web driver behind an API primary, or null when a web driver *is* the
    * primary. Constructing it touches nothing -- no tab opens until the first
    * failover -- so keeping one warm costs nothing on a healthy night.
+   *
+   * DeepAI is the fallback regardless of which web driver the user picked as
+   * their primary: if they chose DeepSeek they did not want DeepAI as a
+   * silent second opinion, and the point of a fallback is to be different from
+   * the thing that just failed.
    */
   private async getFallbackDriver(primary: LlmDriver, config: LlmConfig): Promise<LlmDriver | null> {
-    if (primary.id === 'deepseek-web') return null
+    if (primary.id.endsWith('-web')) return null
     if (!this.fallback || this.fallbackFor !== config.driver) {
       await this.fallback?.dispose?.().catch(() => {})
-      this.fallback = new DeepSeekWebDriver(config)
+      this.fallback = new ChatWebDriver(config, DEEPAI)
       this.fallbackFor = config.driver
       log.info(`LLM fallback set to ${this.fallback.label}`)
     } else {
@@ -274,7 +282,7 @@ class LlmBroker {
       }
 
       // Transport retries exhausted and still no valid JSON. If we have a
-      // fallback (DeepSeek web), try it once — Llama/Mixtral often succeed
+      // fallback (a free web driver), try it once — Llama/Mixtral often succeed
       // where diffusion models return prose.
       if (fallback && lastParseError && /No JSON found|failed validation/i.test(lastParseError.message)) {
         try {
@@ -347,7 +355,7 @@ class LlmBroker {
           log.warn(`${label}: ${driver.label} failed (${errorMessage(lastError)}); fallback ${fallback.label} not ready (${fbHealth.detail})`)
           throw new LlmError(
             `${driver.label} failed (${errorMessage(lastError)}); fallback ${fallback.label} not ready: ${fbHealth.detail}. ` +
-              `Fix the NIM key/model or sign in to chat.deepseek.com for fallback.`,
+              `Fix the NIM key/model, or sign in to the ${fallback.label} tab for fallback.`,
             'transport'
           )
         }

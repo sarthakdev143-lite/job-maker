@@ -1,4 +1,4 @@
-/**
+﻿/**
  * The extension checking itself.
  *
  * There are four hundred unit tests in this repository and not one of them
@@ -27,7 +27,7 @@ import { createLogger } from '@/shared/logger'
 import { activity } from '@/shared/activity'
 import { llm } from '@/llm/broker'
 import { LlmError } from '@/llm/driver'
-import { formAgentFiles } from '@/shared/injection'
+import { chatBridgeFiles, formAgentFiles } from '@/shared/injection'
 import { getProfile, getRecipes, profileIsUsable } from '@/storage/settings'
 import { jobsRepo } from '@/storage/db'
 import { probeJobPage, type PageProbe } from '@/runner/apply-machine'
@@ -113,6 +113,34 @@ async function checkContentScript(): Promise<SelfTestCheck> {
     name: 'The page agent exists in this build',
     status: 'fail',
     detail: 'The manifest lists no content script for job pages, so nothing can be injected into any form.',
+    fix: 'Rebuild the extension; this is a packaging failure, not a setting.',
+  }
+}
+
+/**
+ * Is the chat bridge actually in this build?
+ *
+ * The web drivers find their bridge by looking the content script up in the live
+ * manifest, keyed on the chat site's hostname. That lookup returning nothing is
+ * silent: injection fails with "no content script files in the manifest" and what
+ * the user sees is a driver that cannot find its chat box, which reads as a
+ * broken page rather than a broken build. The form agent has always had this
+ * check; the bridge did not, and adding a second chat site made the lookup
+ * conditional on a hostname list, which is exactly the kind of thing that goes
+ * quietly stale.
+ */
+async function checkChatBridge(): Promise<SelfTestCheck> {
+  const files = chatBridgeFiles()
+  const name = 'The chat bridge exists in this build'
+  if (files.length > 0) {
+    return { id: 'chatBridge', name, status: 'pass', detail: files.join(', ') }
+  }
+  return {
+    id: 'chatBridge',
+    name,
+    status: 'fail',
+    detail:
+      'The manifest lists no content script for the chat sites, so a web driver cannot type a prompt. API drivers are unaffected.',
     fix: 'Rebuild the extension; this is a packaging failure, not a setting.',
   }
 }
@@ -435,6 +463,7 @@ export async function runSelfTest(options: SelfTestOptions = {}): Promise<SelfTe
   for (const check of [
     checkBuild,
     checkContentScript,
+    checkChatBridge,
     checkSiteAccess,
     checkAlarms,
     checkStorage,

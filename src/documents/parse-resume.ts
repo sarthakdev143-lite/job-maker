@@ -106,7 +106,7 @@ export async function parseResumeText(text: string, settings: Settings): Promise
         `• On NVIDIA NIM, check the key is valid and the model is an instruct model — ` +
         `Press "List available models" to see what your key can actually call — providers ` +
         `retire models without notice, and a retired one fails exactly like this.\n` +
-        `• On the DeepSeek web driver, check you are still signed in at chat.deepseek.com.\n\n` +
+        `• On a web driver, check you are still signed in to the chat site and that no dialog is covering the chat box.\n\n` +
         `Currently set to: ${settings.llm.driver}${settings.llm.model ? ` (${settings.llm.model})` : ''}.`
     )
   }

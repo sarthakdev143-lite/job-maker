@@ -8,7 +8,7 @@
  * the model answers the wrong question.
  */
 
-import { buildSelector } from './selector'
+import { buildSelector, oneByAttr, queryByAttr } from './selector'
 import { normalizeQuestion, normalizeText } from '@/shared/text'
 import type { FieldDescriptor, FieldKind } from '@/storage/schemas'
 
@@ -83,17 +83,20 @@ function cleanLabel(raw: string): string {
  * different one of these, so all six are needed to cover the target set.
  */
 export function resolveLabel(el: HTMLElement, doc: Document = document): string {
-  const id = el.getAttribute('id')
+  const id = attr(el, 'id')
+  const controlName = attr(el, 'name')
 
   // 1. <label for="...">
-  if (id) {
-    try {
-      const forLabel = doc.querySelector<HTMLLabelElement>(`label[for="${CSS.escape(id)}"]`)
-      if (forLabel?.innerText) return cleanLabel(forLabel.innerText)
-    } catch {
-      // Malformed id; fall through.
-    }
-  }
+  //
+  // Ashby points the label at the control's *name* rather than its id, and its
+  // controls carry no id at all, so checking the id alone meant the question
+  // was never found: the three work-authorisation questions on a real Ashby
+  // form came through as three identical required checkboxes reading "No".
+  // An id is tried first because a page may label both.
+  const forLabel = (oneByAttr(doc, 'label', 'for', id) ?? oneByAttr(doc, 'label', 'for', controlName)) as
+    | HTMLLabelElement
+    | null
+  if (forLabel?.innerText) return cleanLabel(forLabel.innerText)
 
   // 2. aria-labelledby (Workday leans on this heavily)
   const labelledBy = attr(el, 'aria-labelledby')
@@ -256,6 +259,106 @@ function optionsOfCombobox(el: HTMLElement, doc: Document): Array<{ value: strin
     .slice(0, 200)
 }
 
+/**
+ * The selectable members of an ARIA choice group.
+ *
+ * A React-rendered yes/no or multiple-choice question is a `div[role=
+ * "radiogroup"]` holding `div[role="radio"]` members. It has no `name` to group
+ * by and no `<option>`s to enumerate, so the collapse in `harvestFields` --
+ * which is written entirely in terms of `input[type=radio][name=...]` -- could
+ * not see it. Such a group was harvested as a radio question carrying *zero*
+ * options, which left the resolver and the model with nothing to choose from,
+ * and the filler with no writer at all, so the field was reported unfillable
+ * and parked. Workable, SmartRecruiters and the current Lever and Ashby forms
+ * all render their choice questions this way, so this was not an edge case: it
+ * was most of the mandatory questions on the forms the agent actually meets.
+ *
+ * A `radiogroup` holds `role="radio"`; a multi-select holds a `role="group"` of
+ * `role="checkbox"`. Both are searched, in that order, because a container is
+ * free to mix them and a question is whichever kind it actually holds.
+ */
+function ariaMembersOf(el: HTMLElement, role: 'radio' | 'checkbox'): HTMLElement[] {
+  if (attr(el, 'role') === role) return [el]
+  return Array.from(el.querySelectorAll<HTMLElement>(`[role="${role}"], [role="option"]`)).filter(isVisible)
+}
+
+function optionsFromMembers(members: HTMLElement[]): Array<{ value: string; label: string }> {
+  return members
+    .map((m) => {
+      const text = ((m.innerText ?? m.textContent ?? '') || attr(m, 'aria-label')).trim()
+      return { value: attr(m, 'data-value') || attr(m, 'value') || text, label: text }
+    })
+    .filter((o) => o.label)
+    .slice(0, 200)
+}
+
+/** Selection state, for both real inputs and ARIA members. */
+function isAriaChecked(el: HTMLElement): boolean {
+  return attr(el, 'aria-checked') === 'true' || (el as HTMLInputElement).checked === true
+}
+
+/** The label of the selected member, or '' when the question is unanswered. */
+function ariaCheckedLabel(members: HTMLElement[]): string {
+  const checked = members.find(isAriaChecked)
+  if (!checked) return ''
+  return ((checked.innerText ?? checked.textContent ?? '') || attr(checked, 'aria-label')).trim()
+}
+
+/**
+ * A stable key for a choice group with no `name`, so the filler can find the
+ * same group again after a re-render. `id` and `aria-labelledby` survive; a
+ * generated id is no better than nothing, so the element's own selector is the
+ * fallback.
+ */
+function ariaGroupKey(el: HTMLElement, doc: Document): string {
+  return (
+    attr(el, 'name') ||
+    (() => {
+      const id = attr(el, 'id')
+      if (id && !/^[:.]|[:.]$/.test(id)) return `aria:${id}`
+      const labelledBy = attr(el, 'aria-labelledby')
+      if (labelledBy) return `aria:by:${labelledBy}`
+      return buildSelector(el, doc)
+    })()
+  )
+}
+
+/**
+ * Ashby's Yes/No widget: two buttons and a hidden checkbox behind them.
+ *
+ *   <label for="<uuid>">Are you authorised to work in the country where the job
+ *   is located?</label>
+ *   <div class="ashby-application-form-input-yesno">
+ *     <button data-option="yes" aria-pressed="false">Yes</button>
+ *     <button data-option="no"  aria-pressed="false">No</button>
+ *     <input type="checkbox" tabindex="-1" name="<uuid>">
+ *   </div>
+ *
+ * The checkbox is a value store, not the control, and it is the only element
+ * the harvester used to see. It produced one required boolean per question,
+ * labelled "No" -- the visible text of whichever button came last -- so the
+ * three questions that matter most on the whole form (work authorisation,
+ * sponsorship, office attendance) arrived as three identical, mutually
+ * indistinguishable fields. Nothing upstream could answer them, because the
+ * answer bank matched on question text and there was none.
+ *
+ * The container is harvested instead, with the buttons as the options.
+ */
+function yesNoButtons(el: HTMLElement): HTMLElement[] {
+  const buttons = Array.from(
+    el.querySelectorAll<HTMLElement>('button[data-option], [role="radio"][data-option]')
+  )
+  if (buttons.length >= 2) return buttons
+  // Fall back on the ARIA toggle pair, which is the same widget without the
+  // vendor's class name.
+  const pressed = Array.from(el.querySelectorAll<HTMLElement>('button[aria-pressed]'))
+  return pressed.length >= 2 ? pressed : []
+}
+
+function isYesNoContainer(el: HTMLElement): boolean {
+  return yesNoButtons(el).length >= 2
+}
+
 function isNoise(label: string, name: string): boolean {
   const haystack = `${label} ${name}`
   return NOISE_PATTERNS.some((re) => re.test(haystack))
@@ -269,10 +372,15 @@ function candidateElements(root: ParentNode): HTMLElement[] {
     'select',
     '[role="combobox"]',
     '[role="radiogroup"]',
+    '[role="group"]',
     '[role="checkbox"]',
     '[role="switch"]',
+    '[class*="yesno"]',
     '[contenteditable="true"]',
   ].join(',')
+  // `role="radio"` members are deliberately absent: a radiogroup is harvested as
+  // one question with its members as options, so collecting the members too
+  // would emit one empty descriptor per Yes/No.
   return Array.from(root.querySelectorAll<HTMLElement>(selector))
 }
 
@@ -293,20 +401,117 @@ export function harvestFields(doc: Document = document): FieldDescriptor[] {
     if (attr(el, 'aria-hidden') === 'true') continue
     if (!isVisible(el)) continue
 
+    // The hidden checkbox behind a Yes/No pair holds the value; the buttons
+    // beside it are the control. Emitting both produced the same question
+    // twice, once of them unreadable.
+    if (el instanceof HTMLInputElement && el.type === 'checkbox' && isYesNoContainer(el.parentElement ?? el)) {
+      continue
+    }
+
     const kind = kindOf(el)
-    if (kind === 'unknown') continue
 
     const name = attr(el, 'name')
     const label = resolveLabel(el, doc)
     if (isNoise(label, name)) continue
 
+    // A choice group built from ARIA roles rather than from `<input>`s, handled
+    // before the `unknown` skip below -- a `role="group"` container is not a
+    // control in its own right, so it is classified as unknown and discarded
+    // before anything could harvest the question it carries.
+    //
+    // The container carries the question and the members carry the options, so
+    // the container is what gets harvested and every member is suppressed. Both
+    // halves matter: harvesting each member separately produced one field per
+    // "Yes"/"No" with no question attached, and a multi-select question
+    // collapsed into N independent booleans that could each only be true or
+    // false -- so a candidate who reads three languages had three boxes ticked
+    // to describe one answer, and the answer bank had nothing coherent to match.
+    const ariaRole = attr(el, 'role')
+    if (ariaRole === 'radiogroup' || ariaRole === 'group' || (ariaRole === 'radio' && !name)) {
+      const groupKey = `aria:${ariaGroupKey(el, doc)}`
+      if (seenGroups.has(groupKey)) continue
+
+      const radioMembers = ariaMembersOf(el, 'radio')
+      const checkMembers = radioMembers.length ? [] : ariaMembersOf(el, 'checkbox')
+      const members = radioMembers.length ? radioMembers : checkMembers
+      const groupKind: FieldKind = radioMembers.length ? 'radio' : 'checkbox'
+
+      if (members.length > 1) {
+        seenGroups.add(groupKey)
+        const options = optionsFromMembers(members)
+        out.push(
+          descriptor({
+            el,
+            doc,
+            kind: groupKind,
+            label: groupQuestionAria(el, doc) || label,
+            options,
+            currentValue: ariaCheckedLabel(members),
+            group: groupKey,
+          })
+        )
+      }
+      // Anything this branch did not claim is not a question of its own.
+      continue
+    }
+
+    // A standalone `role="checkbox"`/`role="switch"` toggle: one question, no
+    // group, no input behind it. Harvested on the same terms as a native one.
+    if ((ariaRole === 'checkbox' || ariaRole === 'switch') && !(el instanceof HTMLInputElement)) {
+      // ...unless it is a member of a group the container branch already claimed.
+      const parent = el.parentElement
+      if (parent && parent !== el && ariaMembersOf(parent, 'checkbox').length > 1) continue
+      out.push(
+        descriptor({
+          el,
+          doc,
+          kind: 'checkbox',
+          label,
+          options: [],
+          currentValue: String(isAriaChecked(el)),
+          group: '',
+        })
+      )
+      continue
+    }
+
+    // Ashby's Yes/No button pair, before anything reads the hidden checkbox
+    // behind it. See `yesNoButtons` for why that checkbox is not the control.
+    if (isYesNoContainer(el)) {
+      const groupKey = `yesno:${ariaGroupKey(el, doc)}`
+      if (!seenGroups.has(groupKey)) {
+        seenGroups.add(groupKey)
+        const buttons = yesNoButtons(el)
+        const options = optionsFromMembers(buttons)
+        // The question lives on the label for the backing input, which is where
+        // `resolveLabel` now looks too, so `label` already carries it.
+        out.push(
+          descriptor({
+            el,
+            doc,
+            kind: 'radio',
+            label: label,
+            options,
+            currentValue: ariaCheckedLabel(buttons),
+            group: groupKey,
+          })
+        )
+      }
+      continue
+    }
+
+    if (kind === 'unknown') continue
+
     // Collapse radio and multi-checkbox groups.
     if ((kind === 'radio' || kind === 'checkbox') && name) {
       const groupKey = `${kind}:${name}`
       if (seenGroups.has(groupKey)) continue
-      const members = Array.from(
-        doc.querySelectorAll<HTMLInputElement>(`input[type="${kind}"][name="${CSS.escape(name)}"]`)
-      ).filter(isVisible)
+      const members = queryByAttr(
+        doc,
+        `input[type="${kind}"]`,
+        'name',
+        name
+      ).filter(isVisible) as HTMLInputElement[]
 
       if (members.length > 1 || kind === 'radio') {
         seenGroups.add(groupKey)
@@ -352,6 +557,45 @@ export function harvestFields(doc: Document = document): FieldDescriptor[] {
   }
 
   return dedupeBySelector(out)
+}
+
+/**
+ * The question an ARIA choice group is asking.
+ *
+ * A radiogroup points at its question with `aria-labelledby` far more often
+ * than it contains it, and its own `aria-label` is the next most common. Both
+ * are checked before the wrapper scan, because the wrapper almost always
+ * contains the "Yes"/"No" member text and would hand back an option as if it
+ * were the question.
+ */
+function groupQuestionAria(el: HTMLElement, doc: Document): string {
+  const groupLabel = attr(el, 'aria-label')
+  if (groupLabel) return cleanLabel(groupLabel)
+
+  const labelledBy = attr(el, 'aria-labelledby')
+  if (labelledBy) {
+    const text = labelledBy
+      .split(/\s+/)
+      .map((ref) => doc.getElementById(ref)?.innerText ?? '')
+      .filter(Boolean)
+      .join(' ')
+    if (text.trim()) return cleanLabel(text)
+  }
+
+  const wrapper = el.closest(
+    '[class*="field"], [class*="question"], [class*="form-group"], [data-automation-id], fieldset'
+  )
+  if (wrapper) {
+    const labelNode = wrapper.querySelector('label:not([for]), legend, [class*="label"], [id*="label"]')
+    const text = (labelNode as HTMLElement | null)?.innerText ?? ''
+    const optionTexts = new Set(
+      Array.from(el.querySelectorAll<HTMLElement>('[role="radio"], [role="option"]')).map((m) =>
+        normalizeText(m.innerText ?? m.textContent ?? '')
+      )
+    )
+    if (text.trim() && !optionTexts.has(normalizeText(text))) return cleanLabel(text)
+  }
+  return ''
 }
 
 /**

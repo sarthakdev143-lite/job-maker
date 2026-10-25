@@ -1,26 +1,52 @@
-/**
+﻿/**
  * Model settings.
  *
- * Also the repair bench for the DeepSeek bridge: when their UI changes, the
- * selector overrides here let the user fix it without rebuilding the
- * extension, which matters because that break is a question of when rather
- * than if.
+ * Also the repair bench for the chat bridge: when a site's UI changes, the
+ * selector overrides here let the user fix it without rebuilding the extension,
+ * which matters because that break is a question of when rather than if.
+ *
+ * The default selector JSON is generated from the site's own profile rather than
+ * pasted in beside it. A hand-maintained copy is a second list that drifts, and
+ * when it drifts the repair bench shows the user selectors the bridge does not
+ * use -- which is worse than no repair bench at all.
  */
 
 import { useState } from 'react'
 import { api, useAction, useAsync, useWorkerEvents } from '../../shared/api'
 import { Badge, Field, NumberInput, Section, Select, TextArea, TextInput, Toggle } from '../../shared/components'
 import { assessModel } from '@/llm/model-advice'
+import { isWebDriver, siteById, DEEPAI, type ChatSite } from '@/llm/chat-sites'
 import type { LlmConfig, Settings } from '@/storage/schemas'
 
-const DEFAULT_SELECTOR_JSON = `{
-  "composer": ["textarea#chat-input", "textarea[placeholder]"],
-  "sendButton": ["div[role=\\"button\\"][aria-disabled=\\"false\\"]"],
-  "stopButton": ["div[class*=\\"stop\\"]"],
-  "assistantMessage": [".ds-markdown", "[class*=\\"markdown\\"]"],
-  "newChatButton": ["div[class*=\\"new-chat\\"]", "a[href=\\"/\\"]"],
-  "loginIndicator": ["input[type=\\"password\\"]"]
-}`
+type DriverOption = { value: LlmConfig['driver']; label: string }
+
+/**
+ * Typed explicitly rather than inferred.
+ *
+ * `<Select>` takes its value type from the options it is handed, and spreading
+ * two plain arrays widens the literals to `string` -- at which point every
+ * driver id in the app silently stops type-checking against the schema.
+ */
+const WEB_DRIVER_OPTIONS: DriverOption[] = [
+  { value: 'deepai-web', label: 'DeepAI web chat (free, no API key)' },
+  { value: 'deepseek-web', label: 'DeepSeek web chat (free, no API key)' },
+]
+
+const API_DRIVER_OPTIONS: DriverOption[] = [
+  { value: 'nvidia-nim', label: 'NVIDIA NIM (API key, recommended)' },
+  { value: 'anthropic-api', label: 'Claude API (API key)' },
+  { value: 'openai-compatible', label: 'OpenAI-compatible API (DeepSeek paid, Groq, Ollama…)' },
+]
+
+/** The site whose selectors the repair bench is currently editing. */
+function siteFor(driver: string): ChatSite {
+  return siteById(driver) ?? DEEPAI
+}
+
+function defaultSelectorJson(site: ChatSite): string {
+  return JSON.stringify(site.selectors, null, 2)
+}
+
 
 export default function ModelSection({
   settings,
@@ -47,16 +73,24 @@ export default function ModelSection({
   // than three screens later as an empty profile.
   const modelVerdict = assessModel(llm.driver, llm.model)
 
+  // The repair bench follows whichever web driver is selected: each site has its
+  // own selectors and its own storage key, so editing the wrong one fixed
+  // nothing and looked like it had.
+  const site = siteFor(llm.driver)
+  const isWeb = isWebDriver(llm.driver)
+  const siteName = site.label.replace(' (web)', '')
+
   const loadSelectors = async () => {
-    const bag = await chrome.storage.local.get('deepseekSelectors')
-    setSelectorJson(JSON.stringify(bag.deepseekSelectors ?? JSON.parse(DEFAULT_SELECTOR_JSON), null, 2))
+    const bag = await chrome.storage.local.get(site.storageKey)
+    const stored = bag[site.storageKey]
+    setSelectorJson(JSON.stringify(stored ?? JSON.parse(defaultSelectorJson(site)), null, 2))
   }
 
   const saveSelectors = async () => {
     try {
       const parsed = JSON.parse(selectorJson)
-      await chrome.storage.local.set({ deepseekSelectors: parsed })
-      setSelectorStatus('Saved. Reload the DeepSeek tab for it to take effect.')
+      await chrome.storage.local.set({ [site.storageKey]: parsed })
+      setSelectorStatus(`Saved. Reload the ${siteName} tab for it to take effect.`)
     } catch (e) {
       setSelectorStatus(`Not valid JSON: ${(e as Error).message}`)
     }
@@ -78,33 +112,29 @@ export default function ModelSection({
             <Select
               value={llm.driver}
               onChange={(v) => set({ driver: v })}
-              options={[
-                { value: 'deepseek-web', label: 'DeepSeek web chat (free, no API key)' },
-                { value: 'nvidia-nim', label: 'NVIDIA NIM (API key, recommended)' },
-                { value: 'anthropic-api', label: 'Claude API (API key)' },
-                { value: 'openai-compatible', label: 'OpenAI-compatible API (DeepSeek paid, Groq, Ollama…)' },
-              ]}
+              options={[...WEB_DRIVER_OPTIONS, ...API_DRIVER_OPTIONS]}
             />
           </Field>
         </div>
 
-        {llm.driver === 'deepseek-web' && (
+        {isWeb && (
           <div className="surface-quiet mt-3 px-3 py-2.5">
             <p className="text-[12px]">
-              The agent drives a logged-in chat.deepseek.com tab in a minimised window. It costs nothing and needs no
-              key, but it handles one prompt at a time and depends on DeepSeek's page structure — expect to repair the
-              selectors below occasionally, and switch to an API key if you would rather not.
+              The agent drives a <span className="mono">{new URL(site.chatUrl).hostname}</span> tab in a minimised
+              window. It costs nothing and needs no key
+              {site.authRequired ? '' : ', and works signed out'}, but it handles one prompt at a time and depends on
+              that page's structure — expect to repair the selectors below occasionally, and switch to an API key if
+              you would rather not.
             </p>
             <p className="mt-2 text-[12px]" style={{ color: 'var(--ink-faint)' }}>
-              Automating the consumer chat UI is not something DeepSeek supports, so a heavy run can get the account
-              rate-limited or suspended. Prompts are paced apart to keep the load light, but if you want real volume,
-              switch to <b>OpenAI-compatible API</b> above with base URL <span className="mono">https://api.deepseek.com</span>{' '}
-              and model <span className="mono">deepseek-chat</span> — that is the supported path, it is cheap, and it
-              runs faster than this driver.
+              Automating a consumer chat UI is not something these sites support, so a heavy run can get an account
+              rate-limited or suspended — and free tiers run out of credits. Prompts are paced apart to keep the load
+              light. If you want real volume, use an API driver above; that is the supported path, it is cheap, and it
+              runs faster than this one.
             </p>
             <div className="mt-2 flex flex-wrap gap-1.5">
               <button className="btn btn-sm" disabled={!!busy} onClick={() => run(async () => { await api.openLlmLogin() }, 'opening')}>
-                Open DeepSeek tab
+                Open {siteName} tab
               </button>
               <button className="btn btn-sm" disabled={!!busy} onClick={() => run(async () => { await reloadHealth() }, 'checking')}>
                 Re-check
@@ -118,7 +148,7 @@ export default function ModelSection({
           </div>
         )}
 
-        {llm.driver !== 'deepseek-web' && (
+        {!isWeb && (
           <div className="mt-3 grid grid-cols-2 gap-3">
             <Field label="API key" wide hint="Stored unencrypted in local extension storage on this machine.">
               <TextInput type="password" value={llm.apiKey} onChange={(v) => set({ apiKey: v })} />
@@ -205,7 +235,7 @@ export default function ModelSection({
             <p className="text-[12px]">
               Uses your NVIDIA NIM key over its OpenAI-compatible endpoint. Any instruct model works; larger ones
               follow the answer format more reliably. If NIM is unreachable mid-run, the agent fails over to the
-              DeepSeek web tab for that request rather than parking the application — keep that tab signed in as a
+              DeepAI web tab for that request rather than parking the application — keep that tab signed in as a
               safety net. A wrong key fails fast with a clear error instead of silently falling back.
             </p>
           </div>
@@ -232,7 +262,7 @@ export default function ModelSection({
           </Field>
         </div>
 
-        {llm.driver === 'deepseek-web' && (
+        {isWeb && (
           <Toggle
             checked={llm.keepWindowMinimized}
             onChange={(v) => set({ keepWindowMinimized: v })}
@@ -315,10 +345,10 @@ export default function ModelSection({
         )}
       </Section>
 
-      {llm.driver === 'deepseek-web' && (
+      {isWeb && (
         <Section
           title="Bridge selectors"
-          description="The only place in the extension that knows DeepSeek's DOM. If the bridge stops working, fix it here."
+          description={`The only place in the extension that knows the ${siteName} page structure. If the bridge stops working, fix it here.`}
           actions={
             <button className="btn btn-sm" onClick={() => void loadSelectors()}>
               Load current
@@ -330,7 +360,7 @@ export default function ModelSection({
             <button className="btn btn-sm" onClick={() => void saveSelectors()} disabled={!selectorJson.trim()}>
               Save selectors
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => setSelectorJson(DEFAULT_SELECTOR_JSON)}>
+            <button className="btn btn-ghost btn-sm" onClick={() => setSelectorJson(defaultSelectorJson(site))}>
               Reset to defaults
             </button>
             {selectorStatus && (
@@ -340,7 +370,7 @@ export default function ModelSection({
             )}
           </div>
           <p className="hint">
-            Each key takes a list of CSS selectors, tried in order. The first one that matches a visible element wins.
+            Each key takes a list of CSS selectors, tried in order. The first one that matches a visible element wins. `streaming` is what marks a reply as still being written, and `failedTurn` catches a turn the site itself rejected.
           </p>
         </Section>
       )}
